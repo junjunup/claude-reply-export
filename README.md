@@ -52,3 +52,7 @@ claude plugin install reply-export --marketplace junjunup/claude-reply-export
 - 导出会覆盖当前剪贴板内容。
 - 思考过程不会被导出，只导出回复正文。
 - Markdown 解析使用 [marked](https://github.com/markedjs/marked)（MIT 许可，见 `hooks/vendor/marked.LICENSE.md`）。
+
+## 许可证
+
+[MIT](LICENSE)

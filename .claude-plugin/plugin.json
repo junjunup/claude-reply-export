@@ -6,5 +6,6 @@
     "name": "junjunup"
   },
   "homepage": "https://github.com/junjunup/claude-reply-export",
+  "license": "MIT",
   "types": "./types/index.d.ts"
 }
