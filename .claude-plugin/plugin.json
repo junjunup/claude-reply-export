@@ -1,0 +1,10 @@
+{
+  "name": "reply-export",
+  "version": "0.2.0",
+  "description": "回复下方一键导出：纯文本、富文本、长图、分页卡片、PDF、Word、HTML",
+  "author": {
+    "name": "junjunup"
+  },
+  "homepage": "https://github.com/junjunup/claude-reply-export",
+  "types": "./types/index.d.ts"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "claude-reply-export",
+  "description": "Claude Code 回复一键导出：纯文本、富文本、长图、分页卡片、PDF、Word、HTML",
+  "owner": {
+    "name": "junjunup"
+  },
+  "plugins": [
+    {
+      "name": "reply-export",
+      "source": "./"
+    }
+  ]
+}
