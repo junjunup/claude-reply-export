@@ -6,6 +6,7 @@
 //   {"op":"render","mode":"pdf","html":"...","width":750,"bg":"#fff","pdf":"/x.pdf"}
 //   {"op":"render","mode":"cards","html":"...","width":600,"bg":"#fff","cardHeight":800,
 //        "padTop":48,"padBottom":56,"prefix":"/dir/名字","muted":"#888"}   按 3:4 切成多张卡片
+// 每个任务可带 "lang":"zh"|"en"，决定报错文字的语言。
 // 成功输出 {"ok":true,...}，失败输出 {"ok":false,"error":"..."} 并以 1 退出。
 import Cocoa
 import WebKit
@@ -15,7 +16,12 @@ func reply(_ obj: [String: Any], code: Int32 = 0) -> Never {
   FileHandle.standardOutput.write(data)
   exit(code)
 }
-func fail(_ msg: String) -> Never { reply(["ok": false, "error": msg], code: 1) }
+// 报错语言跟随界面：任务里的 "lang"（zh / en），读到任务之前两种都给
+var uiLang = ""
+func fail(_ zh: String, _ en: String) -> Never {
+  let msg = uiLang == "en" ? en : uiLang == "zh" ? zh : "\(zh) / \(en)"
+  reply(["ok": false, "error": msg], code: 1)
+}
 
 func color(_ hex: String?) -> NSColor {
   guard var h = hex?.trimmingCharacters(in: .whitespaces), h.hasPrefix("#") else { return .white }
@@ -27,7 +33,8 @@ func color(_ hex: String?) -> NSColor {
 
 let input = FileHandle.standardInput.readDataToEndOfFile()
 guard let job = (try? JSONSerialization.jsonObject(with: input)) as? [String: Any],
-      let op = job["op"] as? String else { fail("无法读取任务") }
+      let op = job["op"] as? String else { fail("无法读取任务", "Couldn't read the job") }
+uiLang = (job["lang"] as? String) == "en" ? "en" : "zh"
 
 let app = NSApplication.shared
 app.setActivationPolicy(.prohibited)
@@ -56,14 +63,14 @@ if op == "clip-rich" {
 
 // ---------- 文件放进剪贴板 ----------
 if op == "clip-file" {
-  guard let p = job["path"] as? String, FileManager.default.fileExists(atPath: p) else { fail("文件不存在") }
+  guard let p = job["path"] as? String, FileManager.default.fileExists(atPath: p) else { fail("文件不存在", "The file doesn't exist") }
   let pb = NSPasteboard.general
   pb.clearContents()
   pb.writeObjects([URL(fileURLWithPath: p) as NSURL])
   reply(["ok": true])
 }
 
-guard op == "render" else { fail("未知操作 \(op)") }
+guard op == "render" else { fail("未知操作 \(op)", "Unknown operation \(op)") }
 
 // ---------- 渲染 ----------
 let mode = job["mode"] as? String ?? "long"
@@ -114,7 +121,7 @@ final class Renderer: NSObject, WKNavigationDelegate {
   var result: [String: Any] = ["ok": true]
   init(_ w: WKWebView) { web = w }
 
-  func webView(_ w: WKWebView, didFail n: WKNavigation!, withError e: Error) { fail("页面加载失败：\(e.localizedDescription)") }
+  func webView(_ w: WKWebView, didFail n: WKNavigation!, withError e: Error) { fail("页面加载失败：\(e.localizedDescription)", "Couldn't load the page: \(e.localizedDescription)") }
 
   func webView(_ w: WKWebView, didFinish n: WKNavigation!) {
     settle {
@@ -141,7 +148,7 @@ final class Renderer: NSObject, WKNavigationDelegate {
 
   func measure(_ done: @escaping (Double) -> Void) {
     web.evaluateJavaScript("document.documentElement.scrollHeight") { h, err in
-      guard let h = (h as? NSNumber)?.doubleValue else { fail("无法测量页面高度：\(err?.localizedDescription ?? "")") }
+      guard let h = (h as? NSNumber)?.doubleValue else { fail("无法测量页面高度：\(err?.localizedDescription ?? "")", "Couldn't measure the page height: \(err?.localizedDescription ?? "")") }
       done(max(h, 100))
     }
   }
@@ -159,7 +166,7 @@ final class Renderer: NSObject, WKNavigationDelegate {
     if hiDPI && width < 600 { cfg.snapshotWidth = NSNumber(value: width * 1.5) }
     web.takeSnapshot(with: cfg) { img, err in
       guard let img = img, let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) else {
-        fail("截图失败：\(err?.localizedDescription ?? "")")
+        fail("截图失败：\(err?.localizedDescription ?? "")", "Couldn't capture the page: \(err?.localizedDescription ?? "")")
       }
       done(rep)
     }
@@ -167,9 +174,9 @@ final class Renderer: NSObject, WKNavigationDelegate {
 
   func longImage(_ next: @escaping () -> Void) {
     snapshot(hiDPI: true) { rep in
-      guard let png = rep.representation(using: .png, properties: [:]) else { fail("长图编码失败") }
+      guard let png = rep.representation(using: .png, properties: [:]) else { fail("长图编码失败", "Couldn't encode the long image") }
       if let p = pngPath {
-        do { try png.write(to: URL(fileURLWithPath: p)) } catch { fail("长图保存失败：\(error.localizedDescription)") }
+        do { try png.write(to: URL(fileURLWithPath: p)) } catch { fail("长图保存失败：\(error.localizedDescription)", "Couldn't save the long image: \(error.localizedDescription)") }
         self.result["png"] = p
       }
       if copyImage {
@@ -184,9 +191,9 @@ final class Renderer: NSObject, WKNavigationDelegate {
   }
 
   func cards(_ next: @escaping () -> Void) {
-    guard let prefix = cardPrefix else { fail("缺少卡片保存位置") }
+    guard let prefix = cardPrefix else { fail("缺少卡片保存位置", "No location given for the cards") }
     snapshot { rep in
-      guard let full = rep.cgImage else { fail("截图失败") }
+      guard let full = rep.cgImage else { fail("截图失败", "Couldn't capture the page") }
       let s = Double(rep.pixelsWide) / width                       // 像素 / CSS 像素（通常是 2）
       let totalH = Double(self.web.frame.height)
       let count = max(1, Int(ceil(totalH / cardSlicePx - 0.02)))
@@ -217,7 +224,7 @@ final class Renderer: NSObject, WKNavigationDelegate {
         guard let img = ctx.makeImage(),
               let png = NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:]) else { continue }
         let path = "\(prefix)-\(i + 1).png"
-        do { try png.write(to: URL(fileURLWithPath: path)) } catch { fail("卡片保存失败：\(error.localizedDescription)") }
+        do { try png.write(to: URL(fileURLWithPath: path)) } catch { fail("卡片保存失败：\(error.localizedDescription)", "Couldn't save a card: \(error.localizedDescription)") }
         files.append(path)
       }
       self.result["cards"] = files
@@ -226,16 +233,16 @@ final class Renderer: NSObject, WKNavigationDelegate {
   }
 
   func pdf(_ next: @escaping () -> Void) {
-    guard let out = pdfPath else { fail("缺少 PDF 保存位置") }
+    guard let out = pdfPath else { fail("缺少 PDF 保存位置", "No location given for the PDF") }
     web.createPDF(configuration: WKPDFConfiguration()) { r in
       guard case .success(let data) = r,
             let provider = CGDataProvider(data: data as CFData),
             let longDoc = CGPDFDocument(provider),
-            let longPage = longDoc.page(at: 1) else { fail("PDF 生成失败") }
+            let longPage = longDoc.page(at: 1) else { fail("PDF 生成失败", "Couldn't create the PDF") }
       let longH = Double(longPage.getBoxRect(.mediaBox).height)
       let pages = max(1, Int(ceil(longH / pdfSlicePx - 0.02)))
       var box = CGRect(origin: .zero, size: a4)
-      guard let ctx = CGContext(URL(fileURLWithPath: out) as CFURL, mediaBox: &box, nil) else { fail("无法写入 PDF：\(out)") }
+      guard let ctx = CGContext(URL(fileURLWithPath: out) as CFURL, mediaBox: &box, nil) else { fail("无法写入 PDF：\(out)", "Couldn't write the PDF: \(out)") }
       for i in 0..<pages {
         ctx.beginPDFPage(nil)
         ctx.setFillColor(bg.cgColor)
@@ -263,5 +270,5 @@ let web = WKWebView(frame: NSRect(x: 0, y: 0, width: width, height: 800))
 let renderer = Renderer(web)
 web.navigationDelegate = renderer
 web.loadHTMLString(html, baseURL: nil)
-DispatchQueue.main.asyncAfter(deadline: .now() + 90) { fail("渲染超时") }
+DispatchQueue.main.asyncAfter(deadline: .now() + 90) { fail("渲染超时", "Rendering timed out") }
 app.run()

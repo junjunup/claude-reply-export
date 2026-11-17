@@ -110,7 +110,7 @@ type HelperResult = { ok: boolean; error?: string; pages?: number; rtf?: boolean
 async function runHelper($: EngineInterface, lang: Lang, job: Record<string, unknown>): Promise<HelperResult> {
   const t = STR[lang]
   const bin = await ensureHelper($, lang)
-  const r = await $.process.run([bin], { stdin: JSON.stringify(job), timeoutMs: 120000 })
+  const r = await $.process.run([bin], { stdin: JSON.stringify({ ...job, lang }), timeoutMs: 120000 })
   let parsed: HelperResult
   try {
     parsed = JSON.parse(r.stdout) as HelperResult
