@@ -18,7 +18,8 @@ const sysLang = atom({ plugin: 'reply-export', key: 'sysLang' } as const, 'zh')
 
 /* ---------- 找到这段文字所在的整条回复 ---------- */
 
-type Reply = { texts: string[]; isLastBlock: boolean; isLatest: boolean; found: boolean }
+// closed：后面已经有新的提问，这条回复不会再变
+type Reply = { texts: string[]; isLastBlock: boolean; isLatest: boolean; found: boolean; closed: boolean }
 
 const isPrompt = (m: SessionMessage | undefined) =>
   m !== undefined && m.role === 'user' && (m.toolResults ?? []).length === 0 && m.text.trim() !== ''
@@ -30,14 +31,15 @@ function locateReply(msgs: readonly SessionMessage[], blockText: string): Reply 
     const m = msgs[k]
     if (m && m.role === 'assistant' && m.text.includes(key)) { i = k; break }
   }
-  if (i < 0) return { texts: [blockText], isLastBlock: true, isLatest: true, found: false }
+  if (i < 0) return { texts: [blockText], isLastBlock: false, isLatest: false, found: false, closed: false }
   let s = i
   let t = i
   while (s - 1 >= 0 && !isPrompt(msgs[s - 1])) s--
   while (t + 1 < msgs.length && !isPrompt(msgs[t + 1])) t++
   const texts = msgs.slice(s, t + 1).filter(m => m.role === 'assistant' && m.text.trim() !== '').map(m => m.text.trim())
   const last = texts[texts.length - 1] ?? ''
-  return { texts, isLastBlock: last.endsWith(blockText.trim().slice(-160)), isLatest: t === msgs.length - 1, found: true }
+  const isLatest = t === msgs.length - 1
+  return { texts, isLastBlock: last.endsWith(blockText.trim().slice(-160)), isLatest, found: true, closed: !isLatest }
 }
 
 // 整条回复 = 最后一段正文 + 前面"有结构的实质内容"。
@@ -48,6 +50,10 @@ function replyMarkdown(texts: string[]): string {
   if (texts.length <= 1) return texts[0] ?? ''
   return texts.filter((t, i) => i === texts.length - 1 || isSubstantial(t)).join('\n\n')
 }
+
+// 已结束的回复：记住每段是不是最后一段，之后不再搜索、也不再随每轮重画（长会话不变卡）
+const settled = new Map<string, boolean>()
+const blockKey = (id: string, text: string) => `${id}|${text.length}|${text.slice(0, 64)}`
 
 // 会话消息缓存：每轮结束刷新一次；找不到当前段落时（正在输出的新回复）最多每 1.5 秒补读一次
 let cache: { seq: number; at: number; msgs: readonly SessionMessage[] } | null = null
@@ -91,7 +97,16 @@ async function homeDir($: EngineInterface): Promise<string> {
   return (await sh($, 'printf %s "$HOME"')).stdout
 }
 
-async function ensureHelper($: EngineInterface, lang: Lang): Promise<string> {
+// 同一时间只编译一次：两处同时导出时共用同一个编译任务
+let building: Promise<string> | null = null
+function ensureHelper($: EngineInterface, lang: Lang): Promise<string> {
+  building ??= buildHelper($, lang).finally(() => {
+    building = null
+  })
+  return building
+}
+
+async function buildHelper($: EngineInterface, lang: Lang): Promise<string> {
   const t = STR[lang]
   const src = `${$.plugin.root}/native/helper.swift`
   const bin = `${await homeDir($)}/Library/Caches/reply-export/helper`
@@ -105,7 +120,7 @@ async function ensureHelper($: EngineInterface, lang: Lang): Promise<string> {
   return bin
 }
 
-type HelperResult = { ok: boolean; error?: string; pages?: number; rtf?: boolean; cards?: string[] }
+type HelperResult = { ok: boolean; error?: string; pages?: number; rtf?: boolean; cards?: string[]; pixels?: number[] }
 
 async function runHelper($: EngineInterface, lang: Lang, job: Record<string, unknown>): Promise<HelperResult> {
   const t = STR[lang]
@@ -140,6 +155,9 @@ async function outDir($: EngineInterface, lang: Lang): Promise<string> {
 const reveal = ($: EngineInterface, path: string) => sh($, 'open -R "$1"', [path])
 
 /* ---------- 导出动作 ---------- */
+
+// 超过这个高度（像素）的长图，聊天软件常会压缩，提示改用分页卡片
+const LONG_IMAGE_PX = 12000
 
 // 方案 B：按用途分组
 const COPY_KINDS: Kind[] = ['plain', 'rich', 'image', 'md']
@@ -185,8 +203,9 @@ async function doExport($: EngineInterface, kind: Kind, md: string, p: ReplyExpo
   }
   if (kind === 'image') {
     const pg = page(p.width, 'long')
-    await runHelper($, lang, { op: 'render', mode: 'long', html: pg.html, width: pg.width, bg: pg.bg, png: `${dir}/${file}.png`, copyImage: true })
-    return t.done.image(`${t.themeNames[p.theme]} · ${t.widthNames[p.width]}`, where)
+    const r = await runHelper($, lang, { op: 'render', mode: 'long', html: pg.html, width: pg.width, bg: pg.bg, png: `${dir}/${file}.png`, copyImage: true })
+    const done = t.done.image(`${t.themeNames[p.theme]} · ${t.widthNames[p.width]}`, where)
+    return (r.pixels?.[1] ?? 0) > LONG_IMAGE_PX ? `${done}${t.longHint}` : done
   }
   if (kind === 'cards') {
     const pg = page(p.width, 'cards')
@@ -236,11 +255,21 @@ export const register: Register = on => {
     const original = await next(e)
     if (e.props.isSummary) return original
 
-    const seq = await read($, turnSeq) // 订阅：每轮结束后重画
     const blockText = e.props.text
-    let located = locateReply(await messages($, seq), blockText)
-    if (!located.found) located = locateReply(await messages($, seq, true), blockText)
-    if (!located.isLastBlock) return original
+    const key = blockKey(e.requestId, blockText)
+    const known = settled.get(key)
+    if (known === false) return original
+    let isLatest = false
+    if (known === undefined) {
+      const seq = await read($, turnSeq) // 订阅：未结束的回复每轮结束后重画
+      let located = locateReply(await messages($, seq), blockText)
+      if (!located.found) located = locateReply(await messages($, seq, true), blockText)
+      // 会话记录里还找不到（正在输出）：先不显示，这一轮结束后会重画
+      if (!located.found) return original
+      if (located.closed) settled.set(key, located.isLastBlock)
+      if (!located.isLastBlock) return original
+      isLatest = located.isLatest
+    }
 
     const id = e.requestId
     const at = { requestId: id }
@@ -349,7 +378,7 @@ export const register: Register = on => {
     }
 
     // 最新一条回复常驻显示；更早的回复平时隐藏，鼠标悬停时浮出（操作进行中则保持显示）
-    const alwaysShow = located.isLatest || menuState !== '' || working !== '' || waiting !== ''
+    const alwaysShow = isLatest || menuState !== '' || working !== '' || waiting !== ''
     const scope = `rx-${id.slice(-48)}`
     return (
       <Box flexDirection="column" hover={{ scope }}>

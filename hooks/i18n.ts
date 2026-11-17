@@ -31,6 +31,7 @@ type Strings = {
   noResult: string
   renderFailed: string
   wordFailed: string
+  longHint: string
   folder: string
   whereLabel: (folder: string) => string
   defaultTitle: string
@@ -92,6 +93,7 @@ export const STR: Record<Lang, Strings> = {
     noResult: '渲染组件没有返回结果：',
     renderFailed: '渲染失败',
     wordFailed: 'Word 转换失败：',
+    longHint: '。图片很长，发到微信可能被压缩，可以改用「分页卡片」',
     folder: 'Claude导出',
     whereLabel: f => `下载/${f}`,
     defaultTitle: 'Claude 回复',
@@ -151,6 +153,7 @@ export const STR: Record<Lang, Strings> = {
     noResult: 'The renderer returned no result: ',
     renderFailed: 'Rendering failed',
     wordFailed: "Couldn't convert to Word: ",
+    longHint: '. The image is very long and chat apps may compress it; Page cards may work better.',
     folder: 'Claude Exports',
     whereLabel: f => `Downloads/${f}`,
     defaultTitle: 'Claude reply',

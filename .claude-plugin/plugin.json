@@ -1,6 +1,6 @@
 {
   "name": "reply-export",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "回复下方一键导出：纯文本、富文本、长图、分页卡片、PDF、Word、HTML",
   "author": {
     "name": "junjunup"

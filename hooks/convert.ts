@@ -26,7 +26,7 @@ export function cjkSpace(s: string): string {
 // 只处理标签外、代码外的文字
 function cjkSpaceHtml(html: string): string {
   return html
-    .split(/(<pre[\s\S]*?<\/pre>|<code[\s\S]*?<\/code>|<[^>]+>)/)
+    .split(/(<pre[\s\S]*?<\/pre>|<code[\s\S]*?<\/code>|<a\s[\s\S]*?<\/a>|<[^>]+>)/)
     .map(part => (part.startsWith('<') ? part : cjkSpace(part)))
     .join('')
 }
@@ -49,9 +49,10 @@ function inlinePlain(tokens: Token[] | undefined): string {
           return (t as Tokens.Codespan).text
         case 'link': {
           const l = t as Tokens.Link
-          const text = inlinePlain(l.tokens)
           const href = l.href.replace(/^mailto:/, '')
-          return text === href || l.href.startsWith('#') ? text : P.link(text, l.href)
+          if (l.text === l.href || l.text === href) return href
+          const text = inlinePlain(l.tokens)
+          return l.href.startsWith('#') || !isSafeHref(l.href) ? text : P.link(text, l.href)
         }
         case 'image': {
           const i = t as Tokens.Image
@@ -63,7 +64,7 @@ function inlinePlain(tokens: Token[] | undefined): string {
           return stripTags((t as Tokens.HTML).text)
         case 'text': {
           const x = t as Tokens.Text
-          return x.tokens ? inlinePlain(x.tokens) : x.text
+          return x.tokens ? inlinePlain(x.tokens) : cjkSpace(x.text)
         }
         default:
           return 'text' in t && typeof t.text === 'string' ? t.text : t.raw
@@ -73,7 +74,7 @@ function inlinePlain(tokens: Token[] | undefined): string {
     .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
 }
 
-const inlineText = (tokens: Token[] | undefined) => cjkSpace(inlinePlain(tokens))
+const inlineText = (tokens: Token[] | undefined) => inlinePlain(tokens)
 
 function listPlain(list: Tokens.List, depth: number): string {
   const indent = P.indent.repeat(depth)
@@ -186,7 +187,18 @@ export function highlight(code: string, lang: string): string {
 
 /* ---------- HTML ---------- */
 
+// 只放行这些链接：http(s)、mailto、页内锚点；javascript: 之类一律只显示文字
+const SAFE_HREF = /^(?:https?:|mailto:|#)/i
+export const isSafeHref = (href: string) => SAFE_HREF.test(href.trim())
+
+type RenderOptions = { offline: boolean; lang: Lang }
+
 class ExportRenderer extends Renderer {
+  readonly ro: RenderOptions
+  constructor(ro: RenderOptions = { offline: false, lang: 'zh' }) {
+    super()
+    this.ro = ro
+  }
   // 原始 HTML 一律转义显示，不执行
   override html(token: Tokens.HTML | Tokens.Tag): string {
     return escapeHtml(token.text)
@@ -196,11 +208,25 @@ class ExportRenderer extends Renderer {
     const label = lang ? `<div class="code-lang">${escapeHtml(lang)}</div>` : ''
     return `<pre>${label}<code>${highlight(token.text.replace(/\n$/, ''), lang)}</code></pre>\n`
   }
+  override link(token: Tokens.Link): string {
+    const text = this.parser.parseInline(token.tokens)
+    if (!isSafeHref(token.href)) return text
+    const title = token.title ? ` title="${escapeHtml(token.title)}"` : ''
+    return `<a href="${escapeHtml(token.href)}"${title}>${text}</a>`
+  }
+  // 渲染长图 / 卡片 / PDF 时不联网：图片换成文字占位
+  override image(token: Tokens.Image): string {
+    if (this.ro.offline || !isSafeHref(token.href) || token.href.startsWith('mailto:')) {
+      const alt = token.text ? (this.ro.lang === 'en' ? `Image: ${token.text}` : `图片：${token.text}`) : this.ro.lang === 'en' ? 'Image' : '图片'
+      return `<span class="img-ph">[${escapeHtml(alt)}]</span>`
+    }
+    return `<img src="${escapeHtml(token.href)}" alt="${escapeHtml(token.text)}">`
+  }
 }
 
-function mdToHtml(md: string): string {
+function mdToHtml(md: string, ro?: RenderOptions): string {
   const tokens = Lexer.lex(md, { gfm: true })
-  return cjkSpaceHtml(Parser.parse(tokens, { gfm: true, renderer: new ExportRenderer() }))
+  return cjkSpaceHtml(Parser.parse(tokens, { gfm: true, renderer: new ExportRenderer(ro) }))
 }
 
 /* ---------- 主题 ---------- */
@@ -272,6 +298,7 @@ function pageCss(p: Palette, width: number, font: number, padX: number): string 
   td + td, th + th{border-left:1px solid ${p.border};}
   hr{border:none;border-top:1px dashed ${p.border};margin:1.6em 0;}
   img{max-width:100%;border-radius:8px;}
+  .img-ph{color:${p.muted};font-size:.9em;}
   input[type=checkbox]{accent-color:${p.accent};margin-right:6px;}
   .footer{margin:28px ${padX}px 0;padding:14px 0 30px;border-top:1px solid ${p.border};color:${p.muted};font-size:12px;display:flex;justify-content:space-between;}
   `
@@ -299,6 +326,8 @@ export function toPage(md: string, o: PageOptions): { html: string; width: numbe
   const isCard = o.mode === 'cards'
   const w = isCard ? { px: CARD.width, font: 17, pad: CARD.padX } : WIDTHS[o.width]
   const { title, body } = splitTitle(md)
+  const offline = o.mode !== 'html'
+  const csp = `default-src 'none'; style-src 'unsafe-inline'; img-src ${offline ? 'data:' : 'https: http: data:'}`
   const hero = title
     ? `<div class="hero"><h1>${escapeHtml(cjkSpace(title))}</h1><div class="meta">${escapeHtml(o.date)}</div></div>`
     : ''
@@ -308,11 +337,12 @@ export function toPage(md: string, o: PageOptions): { html: string; width: numbe
   const html = `<!doctype html>
 <html lang="${o.lang === 'zh' ? 'zh-CN' : 'en'}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="${csp}">
 <title>${escapeHtml(titleOf(md, o.lang))}</title>
 <style>${pageCss(p, w.px, w.font, w.pad)}
   .wrap{padding-top:${topPad}px;}
 </style></head>
-<body><div class="wrap">${hero}<div class="content">${mdToHtml(body)}</div>${footer}</div></body></html>`
+<body><div class="wrap">${hero}<div class="content">${mdToHtml(body, { offline, lang: o.lang })}</div>${footer}</div></body></html>`
   return { html, width: w.px, bg: p.bg }
 }
 
