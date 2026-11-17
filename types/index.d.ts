@@ -3,6 +3,8 @@ export type ReplyExportPrefs = {
   theme: 'paper' | 'clean' | 'dark'
   /** 长图宽度：phone 手机、desktop 电脑 */
   width: 'phone' | 'desktop'
+  /** 界面语言：auto 跟随系统、zh 中文、en English */
+  lang: 'auto' | 'zh' | 'en'
 }
 
 declare module 'claude-code' {
@@ -18,6 +20,8 @@ declare module 'claude-code' {
       turnSeq: number
       /** 导出偏好，同时存进 $.store 跨会话保留 */
       prefs: ReplyExportPrefs
+      /** 启动时读到的系统语言（zh / en），供“跟随系统”使用 */
+      sysLang: 'zh' | 'en'
     }
   }
 }

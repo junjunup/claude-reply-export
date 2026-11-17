@@ -2,9 +2,7 @@
 
 [中文](README.md) | English
 
-Adds an "⤓ 导出" (Export) button under each reply in Claude Code that turns the reply into a format ready to share on other platforms. The button runs locally, never goes through the model, and uses no tokens.
-
-> The plugin's interface (buttons, notifications, and the plain-text formatting) is currently in Chinese only. See [Language](#language).
+Adds an "⤓ Export" button under each reply in Claude Code that turns the reply into a format ready to share on other platforms. The button runs locally, never goes through the model, and uses no tokens.
 
 ## What it exports
 
@@ -19,12 +17,12 @@ Adds an "⤓ 导出" (Export) button under each reply in Claude Code that turns 
 | | Word | .docx; the file is also put on the clipboard |
 | | HTML | A standalone web page |
 
-- Three themes (warm paper, clean white, dark) and two widths (phone, desktop); your choice is remembered.
+- Three themes (warm paper, clean white, dark), two widths (phone, desktop), and an English or Chinese interface; your choices are remembered.
 - A reply that starts with a heading gets a title card; code blocks are syntax-highlighted; spaces are added between Chinese and Latin text.
 - "Whole reply" joins the body text that tool calls split apart and skips the progress updates sent in between.
 - **Privacy check before export**: when it finds local file paths, email addresses, phone numbers, or likely API keys, it asks whether to mask them before exporting.
 
-Files are saved to `~/Downloads/Claude导出/`.
+Files are saved to `~/Downloads/Claude Exports/` (or `~/Downloads/Claude导出/` when the interface is in Chinese).
 
 ## Install
 
@@ -53,7 +51,9 @@ In the Claude desktop app (where `/plugin` isn't available): click **+** next to
 
 ## Language
 
-The interface is in Chinese for now: button labels, notifications, the export folder name, and the markers used in plain-text output (for example 【】 around headings). The export content itself is whatever language the reply is in, so English replies export as English.
+The interface comes in English and Chinese. By default it follows your macOS language; to change it, open the export card and click **Language** under **Style** (Auto → 中文 → English).
+
+The language setting covers button labels, notifications, the export folder name, the page footer, and the plain-text markers (English uses ■ and ▸ for headings and "Item: value" for table rows). The exported content itself stays in whatever language the reply is in.
 
 ## Notes
 

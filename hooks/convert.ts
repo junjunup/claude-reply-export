@@ -1,6 +1,8 @@
 // Markdown → 纯文本 / 富文本 HTML / 可渲染的完整页面
 import { Lexer, Parser, Renderer } from './vendor/marked.esm.js'
 import type { Token, Tokens } from './vendor/marked.esm.js'
+import { STR } from './i18n.ts'
+import type { Lang } from './i18n.ts'
 
 export type ThemeName = 'paper' | 'clean' | 'dark'
 export type WidthName = 'phone' | 'desktop'
@@ -31,6 +33,9 @@ function cjkSpaceHtml(html: string): string {
 
 /* ---------- 纯文本：给微信这类不认 Markdown 的平台 ---------- */
 
+// 当前语言的纯文本标记；toPlain 同步运行，开始时设定
+let P = STR.zh.plain
+
 function inlinePlain(tokens: Token[] | undefined): string {
   if (!tokens) return ''
   return tokens
@@ -46,11 +51,11 @@ function inlinePlain(tokens: Token[] | undefined): string {
           const l = t as Tokens.Link
           const text = inlinePlain(l.tokens)
           const href = l.href.replace(/^mailto:/, '')
-          return text === href || l.href.startsWith('#') ? text : `${text}（${l.href}）`
+          return text === href || l.href.startsWith('#') ? text : P.link(text, l.href)
         }
         case 'image': {
           const i = t as Tokens.Image
-          return `[图片${i.text ? '：' + i.text : ''}] ${i.href}`
+          return P.image(i.text, i.href)
         }
         case 'br':
           return '\n'
@@ -71,7 +76,7 @@ function inlinePlain(tokens: Token[] | undefined): string {
 const inlineText = (tokens: Token[] | undefined) => cjkSpace(inlinePlain(tokens))
 
 function listPlain(list: Tokens.List, depth: number): string {
-  const indent = '　'.repeat(depth)
+  const indent = P.indent.repeat(depth)
   const start = typeof list.start === 'number' ? list.start : 1
   return list.items
     .map((item, i) => {
@@ -93,9 +98,9 @@ function tablePlain(t: Tokens.Table): string {
   return t.rows
     .map(row => {
       const cells = row.map(c => inlineText(c.tokens))
-      if (cells.length <= 2) return `• ${cells[0] ?? ''}${cells[1] !== undefined ? '：' + cells[1] : ''}`
-      const lines = cells.slice(1).map((c, i) => `　${head[i + 1] ?? ''}：${c}`)
-      return `• ${head[0] ? head[0] + '：' : ''}${cells[0] ?? ''}\n${lines.join('\n')}`
+      if (cells.length <= 2) return `• ${cells[0] ?? ''}${cells[1] !== undefined ? P.colon + cells[1] : ''}`
+      const lines = cells.slice(1).map((c, i) => `${P.indent}${head[i + 1] ?? ''}${P.colon}${c}`)
+      return `• ${head[0] ? head[0] + P.colon : ''}${cells[0] ?? ''}\n${lines.join('\n')}`
     })
     .join('\n')
 }
@@ -109,7 +114,7 @@ function blocksPlain(tokens: Token[]): string {
       case 'heading': {
         const h = t as Tokens.Heading
         const text = inlineText(h.tokens)
-        out.push(h.depth <= 2 ? `【${text}】` : `▍${text}`)
+        out.push(h.depth <= 2 ? P.h12(text) : P.h3(text))
         break
       }
       case 'paragraph':
@@ -122,7 +127,7 @@ function blocksPlain(tokens: Token[]): string {
         out.push((t as Tokens.Code).text)
         break
       case 'blockquote':
-        out.push(blocksPlain((t as Tokens.Blockquote).tokens).split('\n').map(l => '｜' + l).join('\n'))
+        out.push(blocksPlain((t as Tokens.Blockquote).tokens).split('\n').map(l => P.quote + l).join('\n'))
         break
       case 'table':
         out.push(tablePlain(t as Tokens.Table))
@@ -140,7 +145,8 @@ function blocksPlain(tokens: Token[]): string {
   return out.filter(s => s.trim() !== '').join('\n\n')
 }
 
-export function toPlain(md: string): string {
+export function toPlain(md: string, lang: Lang = 'zh'): string {
+  P = STR[lang].plain
   return blocksPlain(Lexer.lex(md, { gfm: true })).replace(/\n{3,}/g, '\n\n').trim()
 }
 
@@ -278,13 +284,14 @@ function splitTitle(md: string): { title: string | null; body: string } {
   return { title: m[1].replace(/[*_`]/g, ''), body: md.slice(m[0].length) }
 }
 
-export function titleOf(md: string): string {
+export function titleOf(md: string, lang: Lang = 'zh'): string {
+  const fallback = STR[lang].defaultTitle
   const { title } = splitTitle(md)
-  const first = title ?? md.split('\n').find(l => l.trim() !== '') ?? 'Claude 回复'
-  return first.replace(/[*_`#>[\]|]/g, '').trim().slice(0, 40) || 'Claude 回复'
+  const first = title ?? md.split('\n').find(l => l.trim() !== '') ?? fallback
+  return first.replace(/[*_`#>[\]|]/g, '').trim().slice(0, 40) || fallback
 }
 
-export type PageOptions = { theme: ThemeName; width: WidthName; mode: PageMode; date: string }
+export type PageOptions = { theme: ThemeName; width: WidthName; mode: PageMode; date: string; lang: Lang }
 
 /** 渲染长图 / 卡片 / PDF / 保存 HTML 用的完整页面 */
 export function toPage(md: string, o: PageOptions): { html: string; width: number; bg: string } {
@@ -297,11 +304,11 @@ export function toPage(md: string, o: PageOptions): { html: string; width: numbe
     : ''
   const topPad = isCard ? 0 : 36
   // 卡片模式的页码由原生助手画，不需要页脚
-  const footer = isCard ? '' : `<div class="footer"><span>${title ? '' : escapeHtml(o.date)}</span><span>导出自 Claude</span></div>`
+  const footer = isCard ? '' : `<div class="footer"><span>${title ? '' : escapeHtml(o.date)}</span><span>${escapeHtml(STR[o.lang].footer)}</span></div>`
   const html = `<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8">
+<html lang="${o.lang === 'zh' ? 'zh-CN' : 'en'}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${escapeHtml(titleOf(md))}</title>
+<title>${escapeHtml(titleOf(md, o.lang))}</title>
 <style>${pageCss(p, w.px, w.font, w.pad)}
   .wrap{padding-top:${topPad}px;}
 </style></head>
@@ -357,6 +364,6 @@ export function toRichHtml(md: string): string {
 }
 
 /** Word 用：同样的内联样式，加上完整文档外壳 */
-export function toWordHtml(md: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(titleOf(md))}</title></head><body>${toRichHtml(md)}</body></html>`
+export function toWordHtml(md: string, lang: Lang = 'zh'): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(titleOf(md, lang))}</title></head><body>${toRichHtml(md)}</body></html>`
 }

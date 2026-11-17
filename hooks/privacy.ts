@@ -1,7 +1,6 @@
 // 导出前的隐私检查：本机路径、邮箱、手机号、密钥
-export type FindingKind = 'path' | 'email' | 'phone' | 'secret'
-
-const LABELS: Record<FindingKind, string> = { path: '本机路径', email: '邮箱', phone: '手机号', secret: '疑似密钥' }
+import { STR } from './i18n.ts'
+import type { FindingKind, Lang } from './i18n.ts'
 
 const RULES: { kind: FindingKind; re: RegExp; mask: (m: string) => string }[] = [
   {
@@ -32,14 +31,15 @@ const RULES: { kind: FindingKind; re: RegExp; mask: (m: string) => string }[] = 
 
 export type Scan = { total: number; summary: string }
 
-export function scan(md: string): Scan {
+export function scan(md: string, lang: Lang = 'zh'): Scan {
+  const t = STR[lang]
   const counts = new Map<FindingKind, number>()
   for (const r of RULES) {
     const n = [...md.matchAll(r.re)].length
     if (n > 0) counts.set(r.kind, n)
   }
   const total = [...counts.values()].reduce((a, b) => a + b, 0)
-  const summary = [...counts.entries()].map(([k, n]) => `${LABELS[k]} ${n} 处`).join('、')
+  const summary = [...counts.entries()].map(([k, n]) => t.count(t.findings[k], n)).join(t.listSep)
   return { total, summary }
 }
 

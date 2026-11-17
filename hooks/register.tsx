@@ -2,18 +2,19 @@ import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren, SessionMessage } from 'claude-code'
 
 import type { ReplyExportPrefs } from '../types'
-import { CARD, THEMES, WIDTHS, titleOf, toPage, toPlain, toRichHtml, toWordHtml } from './convert.ts'
+import { CARD, THEMES, titleOf, toPage, toPlain, toRichHtml, toWordHtml } from './convert.ts'
 import type { ThemeName, WidthName } from './convert.ts'
+import { STR, langFromSystem } from './i18n.ts'
+import type { Kind, Lang, LangPref } from './i18n.ts'
 import { redact, scan } from './privacy.ts'
 
 const menu = atom({ plugin: 'reply-export', key: 'menu' } as const, '')
 const busy = atom({ plugin: 'reply-export', key: 'busy' } as const, '')
 const pending = atom({ plugin: 'reply-export', key: 'pending' } as const, '')
 const turnSeq = atom({ plugin: 'reply-export', key: 'turnSeq' } as const, 0)
-const DEFAULT_PREFS: ReplyExportPrefs = { theme: 'paper', width: 'phone' }
+const DEFAULT_PREFS: ReplyExportPrefs = { theme: 'paper', width: 'phone', lang: 'auto' }
 const prefs = atom({ plugin: 'reply-export', key: 'prefs' } as const, DEFAULT_PREFS)
-
-const OUT_DIR_NAME = 'Claude导出'
+const sysLang = atom({ plugin: 'reply-export', key: 'sysLang' } as const, 'zh')
 
 /* ---------- 找到这段文字所在的整条回复 ---------- */
 
@@ -58,6 +59,28 @@ async function messages($: EngineInterface, seq: number, force = false): Promise
   return cache.msgs
 }
 
+/* ---------- 偏好与语言 ---------- */
+
+const THEME_ORDER: ThemeName[] = ['paper', 'clean', 'dark']
+const WIDTH_ORDER: WidthName[] = ['phone', 'desktop']
+const LANG_ORDER: LangPref[] = ['auto', 'zh', 'en']
+const nextOf = <T,>(list: T[], cur: T): T => list[(list.indexOf(cur) + 1) % list.length] ?? cur
+
+function validPrefs(v: unknown): ReplyExportPrefs {
+  const o = (typeof v === 'object' && v !== null ? v : {}) as Partial<ReplyExportPrefs>
+  return {
+    theme: THEME_ORDER.includes(o.theme as ThemeName) ? (o.theme as ThemeName) : DEFAULT_PREFS.theme,
+    width: WIDTH_ORDER.includes(o.width as WidthName) ? (o.width as WidthName) : DEFAULT_PREFS.width,
+    lang: LANG_ORDER.includes(o.lang as LangPref) ? (o.lang as LangPref) : DEFAULT_PREFS.lang,
+  }
+}
+
+async function currentPrefs($: EngineInterface): Promise<{ p: ReplyExportPrefs; lang: Lang }> {
+  const p = validPrefs(await read($, prefs))
+  const lang: Lang = p.lang === 'auto' ? ((await read($, sysLang)) === 'en' ? 'en' : 'zh') : p.lang
+  return { p, lang }
+}
+
 /* ---------- 本机能力：剪贴板、原生助手、文件 ---------- */
 
 async function sh($: EngineInterface, script: string, args: string[] = [], stdin?: string, timeoutMs = 30000) {
@@ -68,46 +91,48 @@ async function homeDir($: EngineInterface): Promise<string> {
   return (await sh($, 'printf %s "$HOME"')).stdout
 }
 
-async function ensureHelper($: EngineInterface): Promise<string> {
+async function ensureHelper($: EngineInterface, lang: Lang): Promise<string> {
+  const t = STR[lang]
   const src = `${$.plugin.root}/native/helper.swift`
   const bin = `${await homeDir($)}/Library/Caches/reply-export/helper`
   if ((await sh($, '[ -x "$2" ] && [ ! "$1" -nt "$2" ]', [src, bin])).exitCode === 0) return bin
   if ((await sh($, 'command -v xcrun >/dev/null && xcrun --find swiftc >/dev/null 2>&1')).exitCode !== 0) {
-    throw new Error('需要 Xcode 命令行工具：在终端运行 xcode-select --install 后再试')
+    throw new Error(t.needCLT)
   }
-  $.ui.toast('正在准备渲染组件（只在首次或更新后需要，约 10–30 秒）…')
+  $.ui.toast(t.preparing)
   const r = await sh($, 'mkdir -p "$(dirname "$2")" && xcrun swiftc -O "$1" -o "$2"', [src, bin], undefined, 180000)
-  if (r.exitCode !== 0) throw new Error('渲染组件编译失败：' + r.stderr.slice(0, 200))
+  if (r.exitCode !== 0) throw new Error(t.compileFailed + r.stderr.slice(0, 200))
   return bin
 }
 
 type HelperResult = { ok: boolean; error?: string; pages?: number; rtf?: boolean; cards?: string[] }
 
-async function runHelper($: EngineInterface, job: Record<string, unknown>): Promise<HelperResult> {
-  const bin = await ensureHelper($)
+async function runHelper($: EngineInterface, lang: Lang, job: Record<string, unknown>): Promise<HelperResult> {
+  const t = STR[lang]
+  const bin = await ensureHelper($, lang)
   const r = await $.process.run([bin], { stdin: JSON.stringify(job), timeoutMs: 120000 })
   let parsed: HelperResult
   try {
     parsed = JSON.parse(r.stdout) as HelperResult
   } catch {
-    throw new Error('渲染组件没有返回结果：' + (r.stderr || r.stdout).slice(0, 200))
+    throw new Error(t.noResult + (r.stderr || r.stdout).slice(0, 200))
   }
-  if (!parsed.ok) throw new Error(parsed.error ?? '渲染失败')
+  if (!parsed.ok) throw new Error(parsed.error ?? t.renderFailed)
   return parsed
 }
 
 const pad = (n: number) => String(n).padStart(2, '0')
-function stamp(md: string): { file: string; human: string } {
+function stamp(md: string, lang: Lang): { file: string; human: string } {
   const d = new Date()
-  const safe = titleOf(md).replace(/[\\/:*?"<>|\s]+/g, '').slice(0, 24) || 'Claude回复'
+  const safe = titleOf(md, lang).replace(/[\\/:*?"<>|\s]+/g, lang === 'en' ? '-' : '').replace(/^-+|-+$/g, '').slice(0, 32) || 'Claude'
   return {
     file: `${safe}-${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`,
     human: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`,
   }
 }
 
-async function outDir($: EngineInterface): Promise<string> {
-  const dir = `${await homeDir($)}/Downloads/${OUT_DIR_NAME}`
+async function outDir($: EngineInterface, lang: Lang): Promise<string> {
+  const dir = `${await homeDir($)}/Downloads/${STR[lang].folder}`
   await sh($, 'mkdir -p "$1"', [dir])
   return dir
 }
@@ -116,106 +141,87 @@ const reveal = ($: EngineInterface, path: string) => sh($, 'open -R "$1"', [path
 
 /* ---------- 导出动作 ---------- */
 
-type Kind = 'plain' | 'rich' | 'image' | 'cards' | 'pdf' | 'word' | 'html' | 'md'
-
-const ACTIONS: Record<Kind, { label: string; hint?: string }> = {
-  plain: { label: '纯文本', hint: '微信' },
-  rich: { label: '富文本', hint: '飞书 · 邮件' },
-  image: { label: '长图' },
-  md: { label: 'Markdown' },
-  cards: { label: '分页卡片', hint: '小红书' },
-  pdf: { label: 'PDF' },
-  word: { label: 'Word' },
-  html: { label: 'HTML' },
-}
 // 方案 B：按用途分组
-const GROUPS: { title: string; kinds: Kind[] }[] = [
-  { title: '复制到剪贴板', kinds: ['plain', 'rich', 'image', 'md'] },
-  { title: '保存为文件', kinds: ['cards', 'pdf', 'word', 'html'] },
-]
+const COPY_KINDS: Kind[] = ['plain', 'rich', 'image', 'md']
+const SAVE_KINDS: Kind[] = ['cards', 'pdf', 'word', 'html']
 
-async function doExport($: EngineInterface, kind: Kind, md: string, p: ReplyExportPrefs): Promise<string> {
+async function doExport($: EngineInterface, kind: Kind, md: string, p: ReplyExportPrefs, lang: Lang): Promise<string> {
+  const t = STR[lang]
   if (kind === 'plain') {
-    const text = toPlain(md)
+    const text = toPlain(md, lang)
     await sh($, 'pbcopy', [], text)
-    return `已复制纯文本（${text.length} 字），可直接粘贴到微信`
+    return t.done.plain(text.length)
   }
   if (kind === 'md') {
     await sh($, 'pbcopy', [], md)
-    return '已复制 Markdown 原文'
+    return t.done.md
   }
   if (kind === 'rich') {
-    const r = await runHelper($, { op: 'clip-rich', html: toRichHtml(md), plain: toPlain(md) })
-    return r.rtf ? '已复制富文本，可粘贴到飞书、邮件、Word' : '已复制（HTML + 纯文本）'
+    const r = await runHelper($, lang, { op: 'clip-rich', html: toRichHtml(md), plain: toPlain(md, lang) })
+    return t.done.rich(r.rtf === true)
   }
 
-  const { file, human } = stamp(md)
-  const dir = await outDir($)
-  const where = `下载/${OUT_DIR_NAME}`
+  const { file, human } = stamp(md, lang)
+  const dir = await outDir($, lang)
+  const where = t.whereLabel(t.folder)
 
   if (kind === 'word') {
     const path = `${dir}/${file}.docx`
-    const r = await sh($, 'textutil -stdin -format html -convert docx -output "$1"', [path], toWordHtml(md))
-    if (r.exitCode !== 0) throw new Error('Word 转换失败：' + r.stderr.slice(0, 120))
-    await runHelper($, { op: 'clip-file', path })
+    const r = await sh($, 'textutil -stdin -format html -convert docx -output "$1"', [path], toWordHtml(md, lang))
+    if (r.exitCode !== 0) throw new Error(t.wordFailed + r.stderr.slice(0, 120))
+    await runHelper($, lang, { op: 'clip-file', path })
     await reveal($, path)
-    return `Word 已保存到 ${where}，文件也已复制，可在微信里直接粘贴发送`
+    return t.done.word(where)
   }
 
-  const theme = THEMES[p.theme]
+  const page = (width: WidthName, mode: 'long' | 'cards' | 'pdf' | 'html') =>
+    toPage(md, { theme: p.theme, width, mode, date: human, lang })
+
   if (kind === 'html') {
-    const page = toPage(md, { theme: p.theme, width: 'desktop', mode: 'html', date: human })
     const path = `${dir}/${file}.html`
-    await sh($, 'cat > "$1"', [path], page.html)
+    await sh($, 'cat > "$1"', [path], page('desktop', 'html').html)
     await reveal($, path)
-    return `HTML 已保存到 ${where}`
+    return t.done.html(where)
   }
   if (kind === 'image') {
-    const page = toPage(md, { theme: p.theme, width: p.width, mode: 'long', date: human })
-    await runHelper($, { op: 'render', mode: 'long', html: page.html, width: page.width, bg: page.bg, png: `${dir}/${file}.png`, copyImage: true })
-    return `长图已复制到剪贴板（${theme.label} · ${WIDTHS[p.width].label}），也保存到了 ${where}`
+    const pg = page(p.width, 'long')
+    await runHelper($, lang, { op: 'render', mode: 'long', html: pg.html, width: pg.width, bg: pg.bg, png: `${dir}/${file}.png`, copyImage: true })
+    return t.done.image(`${t.themeNames[p.theme]} · ${t.widthNames[p.width]}`, where)
   }
   if (kind === 'cards') {
-    const page = toPage(md, { theme: p.theme, width: p.width, mode: 'cards', date: human })
-    const r = await runHelper($, {
-      op: 'render', mode: 'cards', html: page.html, width: page.width, bg: page.bg, muted: theme.p.muted,
+    const pg = page(p.width, 'cards')
+    const r = await runHelper($, lang, {
+      op: 'render', mode: 'cards', html: pg.html, width: pg.width, bg: pg.bg, muted: THEMES[p.theme].p.muted,
       cardHeight: CARD.height, padTop: CARD.padTop, padBottom: CARD.padBottom, prefix: `${dir}/${file}`,
     })
     const first = r.cards?.[0]
     if (first) await reveal($, first)
-    return `已生成 ${r.cards?.length ?? 0} 张 3:4 卡片，保存在 ${where}`
+    return t.done.cards(r.cards?.length ?? 0, where)
   }
   // pdf：A4 用电脑宽度排版更合适
-  const page = toPage(md, { theme: p.theme, width: 'desktop', mode: 'pdf', date: human })
+  const pg = page('desktop', 'pdf')
   const path = `${dir}/${file}.pdf`
-  const r = await runHelper($, { op: 'render', mode: 'pdf', html: page.html, width: page.width, bg: page.bg, pdf: path })
-  await runHelper($, { op: 'clip-file', path })
+  const r = await runHelper($, lang, { op: 'render', mode: 'pdf', html: pg.html, width: pg.width, bg: pg.bg, pdf: path })
+  await runHelper($, lang, { op: 'clip-file', path })
   await reveal($, path)
-  return `PDF 已保存（${r.pages ?? 1} 页 A4），文件也已复制，可在微信里直接粘贴发送`
+  return t.done.pdf(r.pages ?? 1)
 }
 
 /* ---------- 注册 ---------- */
 
-const THEME_ORDER: ThemeName[] = ['paper', 'clean', 'dark']
-const WIDTH_ORDER: WidthName[] = ['phone', 'desktop']
-const nextOf = <T,>(list: T[], cur: T): T => list[(list.indexOf(cur) + 1) % list.length] ?? cur
-
-function validPrefs(v: unknown): ReplyExportPrefs {
-  const o = (typeof v === 'object' && v !== null ? v : {}) as Partial<ReplyExportPrefs>
-  return {
-    theme: THEME_ORDER.includes(o.theme as ThemeName) ? (o.theme as ThemeName) : DEFAULT_PREFS.theme,
-    width: WIDTH_ORDER.includes(o.width as WidthName) ? (o.width as WidthName) : DEFAULT_PREFS.width,
-  }
-}
-
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await update($, prefs, () => validPrefs(undefined))
     try {
       const saved = await $.store.get('prefs')
-      if (saved !== undefined) await update($, prefs, () => validPrefs(saved))
+      await update($, prefs, () => validPrefs(saved))
     } catch {
       // 读不到就用默认值
+    }
+    try {
+      const r = await sh($, 'defaults read -g AppleLanguages 2>/dev/null')
+      await update($, sysLang, () => langFromSystem(r.stdout))
+    } catch {
+      // 读不到就按中文
     }
     return next(e)
   })
@@ -238,20 +244,22 @@ export const register: Register = on => {
 
     const id = e.requestId
     const at = { requestId: id }
-    const [menuState, working, waiting, p] = await Promise.all([
-      read($, memberOf(menu, e)), read($, memberOf(busy, e)), read($, memberOf(pending, e)), read($, prefs),
+    const [menuState, working, waiting, { p, lang }] = await Promise.all([
+      read($, memberOf(menu, e)), read($, memberOf(busy, e)), read($, memberOf(pending, e)), currentPrefs($),
     ])
+    const t = STR[lang]
     const { Box, Button, Text } = $.ui.resolve(e)
 
     const currentMd = async () => replyMarkdown(locateReply(await messages($, await read($, turnSeq), true), blockText).texts)
 
     const perform = async (kind: Kind, md: string) => {
-      await update($, memberOf(busy, at), () => ACTIONS[kind].label)
+      const now = await currentPrefs($)
+      await update($, memberOf(busy, at), () => STR[now.lang].actions[kind].label)
       try {
-        $.ui.toast(await doExport($, kind, md, await read($, prefs)))
+        $.ui.toast(await doExport($, kind, md, now.p, now.lang))
         await update($, memberOf(menu, at), () => '')
       } catch (err) {
-        $.ui.toast(`导出失败：${err instanceof Error ? err.message : String(err)}`)
+        $.ui.toast(STR[now.lang].failed(err instanceof Error ? err.message : String(err)))
       } finally {
         await update($, memberOf(busy, at), () => '')
       }
@@ -261,7 +269,7 @@ export const register: Register = on => {
     const start = (kind: Kind) => async () => {
       if ((await read($, memberOf(busy, at))) !== '') return
       const md = await currentMd()
-      const found = scan(md)
+      const found = scan(md, (await currentPrefs($)).lang)
       if (found.total > 0) {
         await update($, memberOf(pending, at), () => `${kind}|${found.summary}`)
         return
@@ -278,13 +286,13 @@ export const register: Register = on => {
 
     const setMenu = (v: string) => () => void update($, memberOf(menu, at), () => v)
     const savePrefs = (fn: (q: ReplyExportPrefs) => ReplyExportPrefs) => async () => {
-      const nextPrefs = fn(await read($, prefs))
+      const nextPrefs = fn(validPrefs(await read($, prefs)))
       await update($, prefs, () => nextPrefs)
       await $.store.set('prefs', nextPrefs)
     }
 
     const action = (k: Kind, primary = false) => {
-      const a = ACTIONS[k]
+      const a = t.actions[k]
       return (
         <Button key={k} variant={primary ? 'primary' : undefined} onPress={() => void start(k)()}>
           {a.label}
@@ -299,8 +307,8 @@ export const register: Register = on => {
         {children}
       </Box>
     )
-    const group = (title: string, children: RenderChildren) => (
-      <Box key={`g-${title}`} flexDirection="column">
+    const group = (key: string, title: string, children: RenderChildren) => (
+      <Box key={`g-${key}`} flexDirection="column">
         <Text dimColor size="caption">{title}</Text>
         <Box flexDirection="row" gap={1} flexWrap="wrap" marginTop={1}>{children}</Box>
       </Box>
@@ -308,30 +316,34 @@ export const register: Register = on => {
 
     let row
     if (working !== '') {
-      row = card(<Text dimColor>⏳ 正在导出：{working}…</Text>)
+      row = card(<Text dimColor>{t.exporting(working)}</Text>)
     } else if (waiting !== '') {
       const summary = waiting.split('|')[1] ?? ''
       row = card(
-        <Text>🔒 导出内容里有 {summary}，要先打码吗？</Text>,
+        <Text>{t.privacyAsk(summary)}</Text>,
         <Box flexDirection="row" gap={1} flexWrap="wrap">
-          <Button key="mask" variant="primary" label="打码后导出" onPress={() => void confirm(true)()} />
-          <Button key="raw" label="原样导出" onPress={() => void confirm(false)()} />
-          <Button key="cancel" label="取消" onPress={() => void update($, memberOf(pending, at), () => '')} />
+          <Button key="mask" variant="primary" label={t.mask} onPress={() => void confirm(true)()} />
+          <Button key="raw" label={t.raw} onPress={() => void confirm(false)()} />
+          <Button key="cancel" label={t.cancel} onPress={() => void update($, memberOf(pending, at), () => '')} />
         </Box>,
       )
     } else if (menuState === '') {
-      row = <Button key="export" label="⤓ 导出" onPress={setMenu('open')} />
+      row = <Button key="export" label={t.export} onPress={setMenu('open')} />
     } else {
       row = card(
-        ...GROUPS.map(g => group(g.title, g.kinds.map(k => action(k, k === 'plain')))),
-        group('样式', [
+        group('copy', t.groups.copy, COPY_KINDS.map(k => action(k, k === 'plain'))),
+        group('save', t.groups.save, SAVE_KINDS.map(k => action(k))),
+        group('style', t.groups.style, [
           <Button key="theme" onPress={() => void savePrefs(q => ({ ...q, theme: nextOf(THEME_ORDER, q.theme) }))()}>
-            <Text dimColor>主题：</Text>{THEMES[p.theme].label}
+            <Text dimColor>{t.theme}</Text>{t.themeNames[p.theme]}
           </Button>,
           <Button key="width" onPress={() => void savePrefs(q => ({ ...q, width: nextOf(WIDTH_ORDER, q.width) }))()}>
-            <Text dimColor>宽度：</Text>{WIDTHS[p.width].label}
+            <Text dimColor>{t.width}</Text>{t.widthNames[p.width]}
           </Button>,
-          <Button key="close" label="收起" onPress={setMenu('')} />,
+          <Button key="lang" onPress={() => void savePrefs(q => ({ ...q, lang: nextOf(LANG_ORDER, q.lang) }))()}>
+            <Text dimColor>{t.language}</Text>{t.langNames[p.lang]}
+          </Button>,
+          <Button key="close" label={t.collapse} onPress={setMenu('')} />,
         ]),
       )
     }

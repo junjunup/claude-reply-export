@@ -49,3 +49,21 @@ test('中间的过渡段落不显示导出入口', async ($, on) => {
   expect(await ui.find({ type: 'Button', key: 'export' })).toBeFalsy()
   await ui.unmount()
 })
+
+test('切换到 English 后界面变成英文', async ($, on) => {
+  on('session.messages', () => ({ value: MSGS }))
+  on('store.set', () => ({ value: undefined }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
+  const ui = await $.ui.mount({ ...msg(FINAL, 'desktop'), requestId: 'm-lang' })
+  await ui.press({ key: 'export' })
+  // 跟随系统（默认中文）→ 中文 → English
+  await ui.press({ key: 'lang' })
+  await ui.press({ key: 'lang' })
+  expect((await ui.find({ type: 'Button', key: 'lang' }))?.text).toContain('English')
+  expect((await ui.find({ type: 'Button', key: 'plain' }))?.text).toContain('Plain text')
+  expect((await ui.find({ type: 'Button', key: 'close' }))?.text).toContain('Collapse')
+  await ui.unmount()
+})
