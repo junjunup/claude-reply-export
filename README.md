@@ -1,5 +1,7 @@
 # Claude 回复一键导出（reply-export）
 
+中文 | [English](README.en.md)
+
 在 Claude Code 每条回复下方加一个「⤓ 导出」按钮，一键把回复转成适合各平台转发的格式。按钮在本机运行，不经过模型，不消耗 token。
 
 ## 能导出什么
