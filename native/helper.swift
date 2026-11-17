@@ -183,7 +183,8 @@ final class Renderer: NSObject, WKNavigationDelegate {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setData(png, forType: .png)
-        if let tiff = rep.tiffRepresentation { pb.setData(tiff, forType: .tiff) }
+        // TIFF 未压缩、体积很大；只给不太大的图附带，超长图只放 PNG
+        if rep.pixelsWide * rep.pixelsHigh <= 8_000_000, let tiff = rep.tiffRepresentation { pb.setData(tiff, forType: .tiff) }
       }
       self.result["pixels"] = [rep.pixelsWide, rep.pixelsHigh]
       next()

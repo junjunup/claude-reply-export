@@ -7,6 +7,7 @@ import type { ThemeName, WidthName } from './convert.ts'
 import { STR, langFromSystem } from './i18n.ts'
 import type { Kind, Lang, LangPref } from './i18n.ts'
 import { redact, scan } from './privacy.ts'
+import { locateReply, replyMarkdown } from './reply.ts'
 
 const menu = atom({ plugin: 'reply-export', key: 'menu' } as const, '')
 const busy = atom({ plugin: 'reply-export', key: 'busy' } as const, '')
@@ -15,41 +16,6 @@ const turnSeq = atom({ plugin: 'reply-export', key: 'turnSeq' } as const, 0)
 const DEFAULT_PREFS: ReplyExportPrefs = { theme: 'paper', width: 'phone', lang: 'auto' }
 const prefs = atom({ plugin: 'reply-export', key: 'prefs' } as const, DEFAULT_PREFS)
 const sysLang = atom({ plugin: 'reply-export', key: 'sysLang' } as const, 'zh')
-
-/* ---------- 找到这段文字所在的整条回复 ---------- */
-
-// closed：后面已经有新的提问，这条回复不会再变
-type Reply = { texts: string[]; isLastBlock: boolean; isLatest: boolean; found: boolean; closed: boolean }
-
-const isPrompt = (m: SessionMessage | undefined) =>
-  m !== undefined && m.role === 'user' && (m.toolResults ?? []).length === 0 && m.text.trim() !== ''
-
-function locateReply(msgs: readonly SessionMessage[], blockText: string): Reply {
-  const key = blockText.trim().slice(0, 160)
-  let i = -1
-  for (let k = msgs.length - 1; k >= 0; k--) {
-    const m = msgs[k]
-    if (m && m.role === 'assistant' && m.text.includes(key)) { i = k; break }
-  }
-  if (i < 0) return { texts: [blockText], isLastBlock: false, isLatest: false, found: false, closed: false }
-  let s = i
-  let t = i
-  while (s - 1 >= 0 && !isPrompt(msgs[s - 1])) s--
-  while (t + 1 < msgs.length && !isPrompt(msgs[t + 1])) t++
-  const texts = msgs.slice(s, t + 1).filter(m => m.role === 'assistant' && m.text.trim() !== '').map(m => m.text.trim())
-  const last = texts[texts.length - 1] ?? ''
-  const isLatest = t === msgs.length - 1
-  return { texts, isLastBlock: last.endsWith(blockText.trim().slice(-160)), isLatest, found: true, closed: !isLatest }
-}
-
-// 整条回复 = 最后一段正文 + 前面"有结构的实质内容"。
-// 工具调用之间的进度播报（"正在做 X，下一步做 Y"）通常是一两段无结构的文字，一律跳过。
-const STRUCTURED = /^(#{1,6}\s|[-*+]\s|\d+\.\s|\||```|>\s)/m
-const isSubstantial = (t: string) => t.length >= 200 && STRUCTURED.test(t)
-function replyMarkdown(texts: string[]): string {
-  if (texts.length <= 1) return texts[0] ?? ''
-  return texts.filter((t, i) => i === texts.length - 1 || isSubstantial(t)).join('\n\n')
-}
 
 // 已结束的回复：记住每段是不是最后一段，之后不再搜索、也不再随每轮重画（长会话不变卡）
 const settled = new Map<string, boolean>()
