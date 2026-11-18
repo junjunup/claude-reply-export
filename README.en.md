@@ -58,7 +58,11 @@ The first time you export rich text, a long image, cards, a PDF, or Word, the pl
 
 **It exports the whole reply.** When a reply is split up by tool calls (reading files, running commands), the plugin joins the parts back together and skips progress notes like "Let me look at the code first." Thinking is never exported.
 
-The menu has three groups:
+Click "⤓ Export" and this card opens under the reply:
+
+<img src="docs/en/menu.png" alt="Export menu with three groups: Copy to clipboard, Save as file, Style" width="460">
+
+What each option does:
 
 | Group | Format | Good for | What you get |
 |---|---|---|---|
