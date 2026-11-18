@@ -3,7 +3,7 @@
 //   {"op":"clip-rich","html":"...","plain":"..."}     剪贴板同时写入 HTML、RTF、纯文本
 //   {"op":"clip-file","path":"/x.pdf"}                 把文件本身放进剪贴板（在微信里 ⌘V 发送文件）
 //   {"op":"render","mode":"long","html":"...","width":750,"bg":"#fff","png":"/x.png","copyImage":true}
-//   {"op":"render","mode":"pdf","html":"...","width":750,"bg":"#fff","pdf":"/x.pdf"}
+//   {"op":"render","mode":"pdf","html":"...","width":750,"bg":"#fff","pdf":"/x.pdf","muted":"#888"}   带页码和可点链接
 //   {"op":"render","mode":"cards","html":"...","width":600,"bg":"#fff","cardHeight":800,
 //        "padTop":48,"padBottom":56,"prefix":"/dir/名字","muted":"#888"}   按 3:4 切成多张卡片
 // 每个任务可带 "lang":"zh"|"en"，决定报错文字的语言。
@@ -95,12 +95,12 @@ let cardTop = (job["padTop"] as? NSNumber)?.doubleValue ?? 48
 let cardBottom = (job["padBottom"] as? NSNumber)?.doubleValue ?? 56
 let cardSlicePx = cardH - cardTop - cardBottom
 
-// 把会被切开的段落推到下一页（太高的代码块 / 表格允许跨页）
+// 把会被切开的段落推到下一页；太高的代码块 / 表格 / 列表不整块推，改为按行 / 按项推
 func avoidBreaksJS(_ h: Double) -> String {
   return """
   (() => {
     const H = \(h);
-    const els = document.querySelectorAll('.hero, .content > *, .content li, .content tr, .footer');
+    const els = document.querySelectorAll('.hero, .content > *, .content blockquote > *, .content li, .content tr, .content pre .ln, .footer');
     for (const el of els) {
       const r = el.getBoundingClientRect();
       const top = r.top + window.scrollY, bottom = top + r.height;
@@ -108,25 +108,44 @@ func avoidBreaksJS(_ h: Double) -> String {
       const pageEnd = (Math.floor(top / H) + 1) * H;
       if (bottom > pageEnd + 1 && top < pageEnd) {
         if (el.tagName === 'TR') { for (const c of el.children) c.style.paddingTop = (pageEnd - top + 12) + 'px'; }
+        else if (el.classList.contains('ln')) { el.style.paddingTop = (pageEnd - top + 4) + 'px'; }
         else { const cur = parseFloat(getComputedStyle(el).marginTop) || 0; el.style.marginTop = (cur + pageEnd - top + 6) + 'px'; }
       }
+    }
+    // 页脚只是署名：如果它独自落到新的一页，就不要它，免得多出一张空白页
+    const f = document.querySelector('.footer'), c = document.querySelector('.content');
+    if (f && c) {
+      const contentEnd = c.getBoundingClientRect().bottom + window.scrollY;
+      const footTop = f.getBoundingClientRect().top + window.scrollY;
+      if (Math.floor(footTop / H) > Math.floor((contentEnd - 1) / H)) f.style.display = 'none';
     }
     return document.documentElement.scrollHeight;
   })()
   """
 }
 
+// 排版定下来后各个链接在页面上的位置（CSS 像素，页面坐标），PDF 里用来做可点区域
+let linksJS = """
+JSON.stringify([...document.querySelectorAll('a[href]')]
+  .filter(a => /^(https?:|mailto:)/i.test(a.getAttribute('href') || ''))
+  .flatMap(a => [...a.getClientRects()].map(r => [a.getAttribute('href'), r.left + scrollX, r.top + scrollY, r.width, r.height])))
+"""
+
 final class Renderer: NSObject, WKNavigationDelegate {
   let web: WKWebView
   var result: [String: Any] = ["ok": true]
   init(_ w: WKWebView) { web = w }
+
+  func webView(_ w: WKWebView, didFailProvisionalNavigation n: WKNavigation!, withError e: Error) {
+    fail("页面加载失败：\(e.localizedDescription)", "Couldn't load the page: \(e.localizedDescription)")
+  }
 
   func webView(_ w: WKWebView, didFail n: WKNavigation!, withError e: Error) { fail("页面加载失败：\(e.localizedDescription)", "Couldn't load the page: \(e.localizedDescription)") }
 
   func webView(_ w: WKWebView, didFinish n: WKNavigation!) {
     settle {
       switch mode {
-      case "pdf": self.paginate(pdfSlicePx) { self.pdf { reply(self.result) } }
+      case "pdf": self.paginate(pdfSlicePx) { self.links { ls in self.pdf(ls) { reply(self.result) } } }
       case "cards": self.paginate(cardSlicePx) { self.cards { reply(self.result) } }
       default: self.longImage { reply(self.result) }
       }
@@ -147,7 +166,9 @@ final class Renderer: NSObject, WKNavigationDelegate {
   }
 
   func measure(_ done: @escaping (Double) -> Void) {
-    web.evaluateJavaScript("document.documentElement.scrollHeight") { h, err in
+    // 按内容实际底部量：documentElement.scrollHeight 不会小于视图高度，内容变短（页脚被去掉）时量不出来
+    let js = "(() => { const w = document.querySelector('.wrap'); return w ? Math.ceil(w.getBoundingClientRect().bottom + window.scrollY) : document.documentElement.scrollHeight })()"
+    web.evaluateJavaScript(js) { h, err in
       guard let h = (h as? NSNumber)?.doubleValue else { fail("无法测量页面高度：\(err?.localizedDescription ?? "")", "Couldn't measure the page height: \(err?.localizedDescription ?? "")") }
       done(max(h, 100))
     }
@@ -165,10 +186,11 @@ final class Renderer: NSObject, WKNavigationDelegate {
     // 手机宽度的长图放大到约 3 倍像素，发到手机上更清晰
     if hiDPI && width < 600 { cfg.snapshotWidth = NSNumber(value: width * 1.5) }
     web.takeSnapshot(with: cfg) { img, err in
-      guard let img = img, let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) else {
+      // 直接取位图，不经过 TIFF 编码再解码（超长图能省下一整份未压缩的内存）
+      guard let img = img, let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
         fail("截图失败：\(err?.localizedDescription ?? "")", "Couldn't capture the page: \(err?.localizedDescription ?? "")")
       }
-      done(rep)
+      done(NSBitmapImageRep(cgImage: cg))
     }
   }
 
@@ -233,7 +255,21 @@ final class Renderer: NSObject, WKNavigationDelegate {
     }
   }
 
-  func pdf(_ next: @escaping () -> Void) {
+  typealias Link = (url: URL, x: Double, y: Double, w: Double, h: Double)
+
+  func links(_ done: @escaping ([Link]) -> Void) {
+    web.evaluateJavaScript(linksJS) { v, _ in
+      guard let s = v as? String, let rows = (try? JSONSerialization.jsonObject(with: Data(s.utf8))) as? [[Any]] else { return done([]) }
+      done(rows.compactMap { r in
+        guard r.count == 5, let href = r[0] as? String, let url = URL(string: href),
+              let x = (r[1] as? NSNumber)?.doubleValue, let y = (r[2] as? NSNumber)?.doubleValue,
+              let w = (r[3] as? NSNumber)?.doubleValue, let h = (r[4] as? NSNumber)?.doubleValue, w > 0, h > 0 else { return nil }
+        return (url, x, y, w, h)
+      })
+    }
+  }
+
+  func pdf(_ links: [Link], _ next: @escaping () -> Void) {
     guard let out = pdfPath else { fail("缺少 PDF 保存位置", "No location given for the PDF") }
     web.createPDF(configuration: WKPDFConfiguration()) { r in
       guard case .success(let data) = r,
@@ -257,6 +293,25 @@ final class Renderer: NSObject, WKNavigationDelegate {
         ctx.translateBy(x: 0, y: -CGFloat(sliceTop))
         ctx.drawPDFPage(longPage)
         ctx.restoreGState()
+        // 可点链接：页面坐标 → 纸面坐标（原点在左下），只取落在这一页内容区的部分
+        let top = Double(i) * pdfSlicePx
+        for l in links where l.y + l.h > top && l.y < top + pdfSlicePx {
+          let y0 = max(l.y, top) - top, y1 = min(l.y + l.h, top + pdfSlicePx) - top
+          let rect = CGRect(x: margin + CGFloat(l.x) * pdfScale, y: a4.height - margin - CGFloat(y1) * pdfScale,
+                            width: CGFloat(l.w) * pdfScale, height: CGFloat(y1 - y0) * pdfScale)
+          ctx.setURL(l.url as CFURL, for: rect)
+        }
+        // 页码：底部留白居中
+        if pages > 1 {
+          let label = NSAttributedString(string: "\(i + 1) / \(pages)", attributes: [
+            .font: NSFont.systemFont(ofSize: 9), .foregroundColor: muted,
+          ])
+          NSGraphicsContext.saveGraphicsState()
+          NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+          let sz = label.size()
+          label.draw(at: NSPoint(x: (a4.width - sz.width) / 2, y: margin / 2 - sz.height / 2))
+          NSGraphicsContext.restoreGraphicsState()
+        }
         ctx.endPDFPage()
       }
       ctx.closePDF()

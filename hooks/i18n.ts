@@ -3,7 +3,7 @@ export type Lang = 'zh' | 'en'
 export type LangPref = 'auto' | Lang
 
 export type Kind = 'plain' | 'rich' | 'image' | 'cards' | 'pdf' | 'word' | 'html' | 'md'
-export type FindingKind = 'path' | 'email' | 'phone' | 'secret'
+export type FindingKind = 'path' | 'email' | 'phone' | 'ip' | 'secret'
 
 type Strings = {
   export: string
@@ -36,6 +36,7 @@ type Strings = {
   whereLabel: (folder: string) => string
   defaultTitle: string
   footer: string
+  notes: string
   done: {
     plain: (n: number) => string
     md: string
@@ -84,7 +85,7 @@ export const STR: Record<Lang, Strings> = {
     raw: '原样导出',
     cancel: '取消',
     failed: m => `导出失败：${m}`,
-    findings: { path: '本机路径', email: '邮箱', phone: '手机号', secret: '疑似密钥' },
+    findings: { path: '本机路径', email: '邮箱', phone: '手机号', ip: 'IP 地址', secret: '疑似密钥' },
     count: (l, n) => `${l} ${n} 处`,
     listSep: '、',
     needCLT: '需要 Xcode 命令行工具：在终端运行 xcode-select --install 后再试',
@@ -98,6 +99,7 @@ export const STR: Record<Lang, Strings> = {
     whereLabel: f => `下载/${f}`,
     defaultTitle: 'Claude 回复',
     footer: '导出自 Claude',
+    notes: '注释',
     done: {
       plain: n => `已复制纯文本（${n} 字），可直接粘贴到微信`,
       md: '已复制 Markdown 原文',
@@ -144,7 +146,7 @@ export const STR: Record<Lang, Strings> = {
     raw: 'Export as is',
     cancel: 'Cancel',
     failed: m => `Export failed: ${m}`,
-    findings: { path: 'local path', email: 'email address', phone: 'phone number', secret: 'possible secret key' },
+    findings: { path: 'local path', email: 'email address', phone: 'phone number', ip: 'IP address', secret: 'possible secret key' },
     count: (l, n) => `${n} ${l}${n > 1 ? (l.endsWith('s') ? 'es' : 's') : ''}`,
     listSep: ', ',
     needCLT: 'Xcode Command Line Tools are required. Run xcode-select --install in a terminal, then try again.',
@@ -158,6 +160,7 @@ export const STR: Record<Lang, Strings> = {
     whereLabel: f => `Downloads/${f}`,
     defaultTitle: 'Claude reply',
     footer: 'Exported from Claude',
+    notes: 'Notes',
     done: {
       plain: n => `Plain text copied (${n} characters)`,
       md: 'Markdown copied',

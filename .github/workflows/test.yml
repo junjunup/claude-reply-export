@@ -1,0 +1,23 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Unit and UI tests
+        run: claude plugin test
+      - name: Validate plugin
+        run: claude plugin validate .
+      - name: Native rendering
+        run: node scripts/native-test.ts

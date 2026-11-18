@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { SessionMessage } from 'claude-code'
 
-import { locateReply, replyMarkdown } from '../hooks/reply.ts'
+import { locateReply, occurrences, pickOccurrence, replyMarkdown } from '../hooks/reply.ts'
 
 const u = (text: string): SessionMessage => ({ role: 'user', text, toolUses: [] })
 const tool = (): SessionMessage => ({ role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 't', text: 'ok', isError: false, result: undefined }] } as unknown as SessionMessage)
@@ -40,4 +40,23 @@ test('会话记录里找不到时不显示', async () => {
   const r = locateReply([u('问题')], '还没写进记录的新段落')
   expect(r.found).toBe(false)
   expect(r.isLastBlock).toBe(false)
+})
+
+test('内容相同的两条回复：按第几次出现分别定位', async () => {
+  const msgs = [u('第一问'), a(SUBSTANTIAL), tool(), a('完成。'), u('第二问'), a('完成。')]
+  const first = locateReply(msgs, '完成。', 1)
+  expect(first.closed).toBe(true)
+  expect(replyMarkdown(first.texts)).toContain('中间产出')
+  const second = locateReply(msgs, '完成。', 2)
+  expect(second.isLatest).toBe(true)
+  expect(replyMarkdown(second.texts)).toBe('完成。')
+  expect(occurrences(msgs, '完成。').length).toBe(2)
+})
+
+test('认领规则：沿用自己的；没认领的取剩下的最后一次；都被占了就是还没写进记录', async () => {
+  expect(pickOccurrence(2, new Set(), 1)).toBe(1)
+  expect(pickOccurrence(2, new Set([1]))).toBe(2)
+  expect(pickOccurrence(2, new Set([2]))).toBe(1)
+  expect(pickOccurrence(1, new Set([1]))).toBe(null)
+  expect(pickOccurrence(0, new Set())).toBe(null)
 })

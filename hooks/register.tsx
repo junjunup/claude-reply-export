@@ -2,12 +2,13 @@ import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren, SessionMessage } from 'claude-code'
 
 import type { ReplyExportPrefs } from '../types'
-import { CARD, THEMES, titleOf, toPage, toPlain, toRichHtml, toWordHtml } from './convert.ts'
+import { CARD, THEMES, safeName, titleOf, toPage, toPlain, toRichHtml, toWordHtml } from './convert.ts'
 import type { ThemeName, WidthName } from './convert.ts'
 import { STR, langFromSystem } from './i18n.ts'
 import type { Kind, Lang, LangPref } from './i18n.ts'
 import { redact, scan } from './privacy.ts'
-import { locateReply, replyMarkdown } from './reply.ts'
+import { locateReply, occurrences, pickOccurrence, replyMarkdown, textKey } from './reply.ts'
+import type { Reply } from './reply.ts'
 
 const menu = atom({ plugin: 'reply-export', key: 'menu' } as const, '')
 const busy = atom({ plugin: 'reply-export', key: 'busy' } as const, '')
@@ -29,6 +30,87 @@ async function messages($: EngineInterface, seq: number, force = false): Promise
   if (cache && force && now - cache.at < 1500 && cache.seq === seq) return cache.msgs
   cache = { seq, at: now, msgs: await $.session.messages() }
   return cache.msgs
+}
+
+/* ---------- 内容相同的多条回复：每段认领自己是第几次出现 ---------- */
+
+// 插件拿不到消息在会话记录里的位置，只能按文字找；几条回复文字相同时（比如都是"完成。"），
+// 每段第一次对上时记下自己是第几次出现。第 1 次只记在内存里，第 2 次及以后的按会话存进 $.store，
+// 恢复会话后，没记录的段落自然落到剩下的那一次。
+type Pin = { k: string; n: number }
+const pins = new Map<string, Pin>()
+let pinsFor: string | null = null
+let sessionId = ''
+// 主对话的一轮进行中：这时新出现的段落可能还没写进会话记录，不能拿它去对更早的回复
+let inTurn = false
+
+const hash = (s: string) => {
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193)
+  return (h >>> 0).toString(36)
+}
+const pinKey = (id: string, text: string) => `${id}|${hash(textKey(text))}`
+
+async function loadPins($: EngineInterface): Promise<void> {
+  let sid = ''
+  try {
+    sid = await $.session.id()
+  } catch {
+    // 拿不到会话编号就只用内存
+  }
+  if (pinsFor === sid) return
+  pinsFor = sid
+  sessionId = sid
+  pins.clear()
+  if (sid === '') return
+  try {
+    const saved = await $.store.get(`pins:${sid}`)
+    if (typeof saved === 'object' && saved !== null) {
+      for (const [k, v] of Object.entries(saved as Record<string, unknown>)) {
+        const p = v as Partial<Pin>
+        if (typeof p.k === 'string' && typeof p.n === 'number' && p.n >= 1) pins.set(k, { k: p.k, n: p.n })
+      }
+    }
+  } catch {
+    // 读不到就当没有
+  }
+}
+
+async function savePins($: EngineInterface): Promise<void> {
+  if (sessionId === '') return
+  const out: Record<string, Pin> = {}
+  for (const [k, p] of pins) if (p.n > 1) out[k] = p
+  try {
+    await $.store.set(`pins:${sessionId}`, out)
+  } catch {
+    // 存不了只影响恢复会话后的区分
+  }
+}
+
+const notFound = (blockText: string): Reply => ({ texts: [blockText], isLastBlock: false, isLatest: false, found: false, closed: false })
+
+async function resolveReply($: EngineInterface, msgs: readonly SessionMessage[], id: string, blockText: string): Promise<Reply> {
+  await loadPins($)
+  const key = pinKey(id, blockText)
+  const k = hash(textKey(blockText))
+  const own = pins.get(key)
+  const claimed = new Set<number>()
+  for (const [other, p] of pins) if (other !== key && p.k === k) claimed.add(p.n)
+  const count = occurrences(msgs, blockText).length
+  const n = pickOccurrence(count, claimed, own?.n)
+  if (n === null) {
+    // 每一次都被别的段落认领了：一轮进行中多半是新段落还没写进记录；
+    // 不在输出中（比如同一条消息换了编号重画），退回取最后一次，不认领
+    return inTurn || count === 0 ? notFound(blockText) : locateReply(msgs, blockText)
+  }
+  const r = locateReply(msgs, blockText, n)
+  if (!own) {
+    // 一轮进行中对上的是已结束的回复：多半是新段落还没写进记录，先不认领
+    if (inTurn && r.closed) return notFound(blockText)
+    pins.set(key, { k, n })
+    if (n > 1) await savePins($)
+  }
+  return r
 }
 
 /* ---------- 偏好与语言 ---------- */
@@ -105,7 +187,7 @@ async function runHelper($: EngineInterface, lang: Lang, job: Record<string, unk
 const pad = (n: number) => String(n).padStart(2, '0')
 function stamp(md: string, lang: Lang): { file: string; human: string } {
   const d = new Date()
-  const safe = titleOf(md, lang).replace(/[\\/:*?"<>|\s]+/g, lang === 'en' ? '-' : '').replace(/^-+|-+$/g, '').slice(0, 32) || 'Claude'
+  const safe = safeName(titleOf(md, lang), lang)
   return {
     file: `${safe}-${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`,
     human: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`,
@@ -141,7 +223,7 @@ async function doExport($: EngineInterface, kind: Kind, md: string, p: ReplyExpo
     return t.done.md
   }
   if (kind === 'rich') {
-    const r = await runHelper($, lang, { op: 'clip-rich', html: toRichHtml(md), plain: toPlain(md, lang) })
+    const r = await runHelper($, lang, { op: 'clip-rich', html: toRichHtml(md, lang), plain: toPlain(md, lang) })
     return t.done.rich(r.rtf === true)
   }
 
@@ -186,11 +268,14 @@ async function doExport($: EngineInterface, kind: Kind, md: string, p: ReplyExpo
   // pdf：A4 用电脑宽度排版更合适
   const pg = page('desktop', 'pdf')
   const path = `${dir}/${file}.pdf`
-  const r = await runHelper($, lang, { op: 'render', mode: 'pdf', html: pg.html, width: pg.width, bg: pg.bg, pdf: path })
+  const r = await runHelper($, lang, { op: 'render', mode: 'pdf', html: pg.html, width: pg.width, bg: pg.bg, pdf: path, muted: THEMES[p.theme].p.muted })
   await runHelper($, lang, { op: 'clip-file', path })
   await reveal($, path)
   return t.done.pdf(r.pages ?? 1)
 }
+
+// 正在处理的回复：按钮按下后立刻上锁，连点不会导出两次
+const locks = new Set<string>()
 
 /* ---------- 注册 ---------- */
 
@@ -211,8 +296,14 @@ export const register: Register = on => {
     return next(e)
   })
 
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) inTurn = true
+    return next(e)
+  })
+
   // 每轮结束时让回复重新判断"我是不是最后一段"
   on('turn.complete', async ($, e, next) => {
+    if (e.agentId === undefined) inTurn = false
     await update($, turnSeq, n => n + 1)
     return next(e)
   })
@@ -228,8 +319,8 @@ export const register: Register = on => {
     let isLatest = false
     if (known === undefined) {
       const seq = await read($, turnSeq) // 订阅：未结束的回复每轮结束后重画
-      let located = locateReply(await messages($, seq), blockText)
-      if (!located.found) located = locateReply(await messages($, seq, true), blockText)
+      let located = await resolveReply($, await messages($, seq), e.requestId, blockText)
+      if (!located.found) located = await resolveReply($, await messages($, seq, true), e.requestId, blockText)
       // 会话记录里还找不到（正在输出）：先不显示，这一轮结束后会重画
       if (!located.found) return original
       if (located.closed) settled.set(key, located.isLastBlock)
@@ -245,7 +336,8 @@ export const register: Register = on => {
     const t = STR[lang]
     const { Box, Button, Text } = $.ui.resolve(e)
 
-    const currentMd = async () => replyMarkdown(locateReply(await messages($, await read($, turnSeq), true), blockText).texts)
+    const currentMd = async () =>
+      replyMarkdown((await resolveReply($, await messages($, await read($, turnSeq), true), id, blockText)).texts)
 
     const perform = async (kind: Kind, md: string) => {
       const now = await currentPrefs($)
@@ -261,23 +353,37 @@ export const register: Register = on => {
     }
 
     // 先做隐私检查：发现路径、邮箱、密钥等时让用户选择打码还是原样导出
-    const start = (kind: Kind) => async () => {
-      if ((await read($, memberOf(busy, at))) !== '') return
-      const md = await currentMd()
-      const found = scan(md, (await currentPrefs($)).lang)
-      if (found.total > 0) {
-        await update($, memberOf(pending, at), () => `${kind}|${found.summary}`)
-        return
+    const locked = (fn: () => Promise<void>) => async () => {
+      if (locks.has(id)) return
+      locks.add(id)
+      try {
+        await fn()
+      } finally {
+        locks.delete(id)
       }
-      await perform(kind, md)
     }
 
-    const confirm = (mask: boolean) => async () => {
-      const [kind] = (await read($, memberOf(pending, at))).split('|') as [Kind]
-      await update($, memberOf(pending, at), () => '')
-      const md = await currentMd()
-      await perform(kind, mask ? redact(md) : md)
-    }
+    const start = (kind: Kind) =>
+      locked(async () => {
+        if ((await read($, memberOf(busy, at))) !== '') return
+        const md = await currentMd()
+        const found = scan(md, (await currentPrefs($)).lang)
+        if (found.total > 0) {
+          await update($, memberOf(pending, at), () => `${kind}|${found.summary}`)
+          return
+        }
+        await perform(kind, md)
+      })
+
+    const confirm = (mask: boolean) =>
+      locked(async () => {
+        const waitingNow = await read($, memberOf(pending, at))
+        if (waitingNow === '') return
+        const [kind] = waitingNow.split('|') as [Kind]
+        await update($, memberOf(pending, at), () => '')
+        const md = await currentMd()
+        await perform(kind, mask ? redact(md) : md)
+      })
 
     const setMenu = (v: string) => () => void update($, memberOf(menu, at), () => v)
     const savePrefs = (fn: (q: ReplyExportPrefs) => ReplyExportPrefs) => async () => {

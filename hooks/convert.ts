@@ -31,6 +31,55 @@ function cjkSpaceHtml(html: string): string {
     .join('')
 }
 
+/* ---------- 脚注：marked 不认识，不处理的话定义那一行会整行消失 ---------- */
+
+const SUP = '⁰¹²³⁴⁵⁶⁷⁸⁹'
+const sup = (n: number) => String(n).split('').map(d => SUP[Number(d)] ?? d).join('')
+const FOOTNOTE_DEF = /^ {0,3}\[\^([^\]\s]+)\]:[ \t]?(.*)$/
+const FENCE = /^ {0,3}(```|~~~)/
+
+/** 把 [^id] 换成上标数字，脚注定义收到文末的「注释」里；代码块和行内代码不动 */
+export function footnotes(md: string, lang: Lang = 'zh'): string {
+  const defs = new Map<string, string>()
+  const body: string[] = []
+  const lines = md.split('\n')
+  let fence: string | null = null
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? ''
+    const f = line.match(FENCE)
+    if (f) fence = fence === null ? (f[1] ?? null) : line.trim().startsWith(fence) ? null : fence
+    const d = fence === null && !f ? line.match(FOOTNOTE_DEF) : null
+    if (!d) {
+      body.push(line)
+      continue
+    }
+    // 下面缩进的行算同一条脚注
+    const parts = [d[2] ?? '']
+    while (i + 1 < lines.length && /^(?: {2,}|\t)\S/.test(lines[i + 1] ?? '')) parts.push((lines[++i] ?? '').trim())
+    defs.set(d[1] ?? '', parts.join(' ').trim())
+  }
+  if (defs.size === 0) return md
+
+  const order: string[] = []
+  const num = (id: string) => {
+    if (!order.includes(id)) order.push(id)
+    return order.indexOf(id) + 1
+  }
+  fence = null
+  const out = body.map(line => {
+    const f = line.match(FENCE)
+    if (f) fence = fence === null ? (f[1] ?? null) : line.trim().startsWith(fence) ? null : fence
+    if (fence !== null || f) return line
+    return line
+      .split(/(`+[^`]*`+)/)
+      .map(part => (part.startsWith('`') ? part : part.replace(/\[\^([^\]\s]+)\]/g, (m, id: string) => (defs.has(id) ? sup(num(id)) : m))))
+      .join('')
+  })
+  for (const id of defs.keys()) num(id) // 没被引用的定义也保留，排在后面
+  const notes = order.map((id, i) => `${i + 1}. ${defs.get(id) ?? ''}`)
+  return `${out.join('\n').trimEnd()}\n\n---\n\n**${STR[lang].notes}**\n\n${notes.join('\n')}\n`
+}
+
 /* ---------- 纯文本：给微信这类不认 Markdown 的平台 ---------- */
 
 // 当前语言的纯文本标记；toPlain 同步运行，开始时设定
@@ -148,7 +197,7 @@ function blocksPlain(tokens: Token[]): string {
 
 export function toPlain(md: string, lang: Lang = 'zh'): string {
   P = STR[lang].plain
-  return blocksPlain(Lexer.lex(md, { gfm: true })).replace(/\n{3,}/g, '\n\n').trim()
+  return blocksPlain(Lexer.lex(footnotes(md, lang), { gfm: true })).replace(/\n{3,}/g, '\n\n').trim()
 }
 
 /* ---------- 代码高亮（轻量通用版，不依赖外部库） ---------- */
@@ -161,6 +210,10 @@ const KEYWORDS = new Set(
     .split(' '),
 )
 const HASH_COMMENT = new Set(['py', 'python', 'sh', 'bash', 'zsh', 'shell', 'yaml', 'yml', 'toml', 'rb', 'ruby', 'r', 'perl', 'dockerfile', 'makefile', 'ini', 'conf'])
+
+// 跨行的注释 / 字符串按行拆开包，保证每个 <span> 都不跨行，分页时才能按行切
+const tokenSpan = (cls: string, text: string) =>
+  text.split('\n').map(t => (t ? `<span class="${cls}">${escapeHtml(t)}</span>` : '')).join('\n')
 
 export function highlight(code: string, lang: string): string {
   const hash = HASH_COMMENT.has(lang.toLowerCase())
@@ -175,8 +228,8 @@ export function highlight(code: string, lang: string): string {
     const i = m.index ?? 0
     out += escapeHtml(code.slice(last, i))
     const [all, c, s, n, w] = m
-    if (c) out += `<span class="tk-c">${escapeHtml(c)}</span>`
-    else if (s) out += `<span class="tk-s">${escapeHtml(s)}</span>`
+    if (c) out += tokenSpan('tk-c', c)
+    else if (s) out += tokenSpan('tk-s', s)
     else if (n) out += `<span class="tk-n">${n}</span>`
     else if (w && KEYWORDS.has(w)) out += `<span class="tk-k">${w}</span>`
     else out += escapeHtml(all)
@@ -191,7 +244,8 @@ export function highlight(code: string, lang: string): string {
 const SAFE_HREF = /^(?:https?:|mailto:|#)/i
 export const isSafeHref = (href: string) => SAFE_HREF.test(href.trim())
 
-type RenderOptions = { offline: boolean; lang: Lang }
+// lines：代码块每行包成一个块，PDF / 卡片分页时可以在行与行之间切
+type RenderOptions = { offline: boolean; lang: Lang; lines?: boolean }
 
 class ExportRenderer extends Renderer {
   readonly ro: RenderOptions
@@ -206,7 +260,9 @@ class ExportRenderer extends Renderer {
   override code(token: Tokens.Code): string {
     const lang = (token.lang ?? '').trim().split(/\s+/)[0] ?? ''
     const label = lang ? `<div class="code-lang">${escapeHtml(lang)}</div>` : ''
-    return `<pre>${label}<code>${highlight(token.text.replace(/\n$/, ''), lang)}</code></pre>\n`
+    const code = highlight(token.text.replace(/\n$/, ''), lang)
+    const body = this.ro.lines ? code.split('\n').map(l => `<span class="ln">${l || ' '}</span>`).join('') : code
+    return `<pre>${label}<code>${body}</code></pre>\n`
   }
   override link(token: Tokens.Link): string {
     const text = this.parser.parseInline(token.tokens)
@@ -288,9 +344,10 @@ function pageCss(p: Palette, width: number, font: number, padX: number): string 
   blockquote{margin:.9em 0;padding:.5em 1em;border-left:3px solid ${p.accent};background:${p.quoteBg};color:${p.muted};border-radius:0 8px 8px 0;}
   blockquote p{margin:.3em 0;}
   code{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:.88em;background:${p.inlineCodeBg};color:${p.inlineCode};padding:1px 6px;border-radius:5px;}
-  pre{position:relative;margin:1em 0;padding:16px 18px;background:${p.codeBg};border-radius:10px;font-size:${Math.round(font * 0.8)}px;line-height:1.65;white-space:pre-wrap;word-break:break-all;}
+  pre{position:relative;margin:1em 0;padding:16px 36px 16px 18px;background:${p.codeBg};border-radius:10px;font-size:${Math.round(font * 0.8)}px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;}
   pre code{background:none;color:${p.codeText};padding:0;font-size:inherit;}
   .code-lang{position:absolute;top:6px;right:12px;font-size:11px;color:${p.muted};font-family:-apple-system,sans-serif;text-transform:lowercase;}
+  .ln{display:block;}
   .tk-k{color:${p.k};font-weight:600;} .tk-s{color:${p.s};} .tk-c{color:${p.c};font-style:italic;} .tk-n{color:${p.n};}
   table{border-collapse:separate;border-spacing:0;margin:1em 0;font-size:.9em;width:100%;border:1px solid ${p.border};border-radius:10px;overflow:hidden;}
   th,td{padding:8px 12px;text-align:left;vertical-align:top;border-bottom:1px solid ${p.border};}
@@ -314,8 +371,33 @@ function splitTitle(md: string): { title: string | null; body: string } {
 export function titleOf(md: string, lang: Lang = 'zh'): string {
   const fallback = STR[lang].defaultTitle
   const { title } = splitTitle(md)
-  const first = title ?? md.split('\n').find(l => l.trim() !== '') ?? fallback
-  return first.replace(/[*_`#>[\]|]/g, '').trim().slice(0, 40) || fallback
+  return (title ?? firstTextLine(md) ?? fallback).replace(/[*_`#>[\]|]/g, '').trim().slice(0, 40) || fallback
+}
+
+// 第一行正文：跳过代码块、表格分隔行和只有符号的行（否则以代码块开头的回复会拿语言名当标题）
+function firstTextLine(md: string): string | undefined {
+  let fence: string | null = null
+  for (const line of md.split('\n')) {
+    const f = line.match(FENCE)
+    if (f) {
+      fence = fence === null ? (f[1] ?? null) : line.trim().startsWith(fence) ? null : fence
+      continue
+    }
+    if (fence !== null) continue
+    const t = line.replace(/[*_`#>[\]|:\-\s]/g, '')
+    if (t !== '') return line
+  }
+  return undefined
+}
+
+// 文件名：去掉路径和系统保留字符；开头的点会让文件变成隐藏文件，也去掉
+export function safeName(title: string, lang: Lang): string {
+  return (
+    title
+      .replace(/[\\/:*?"<>|\s\u0000-\u001f]+/g, lang === 'en' ? '-' : '')
+      .replace(/^[-.]+|[-.]+$/g, '')
+      .slice(0, 32) || 'Claude'
+  )
 }
 
 export type PageOptions = { theme: ThemeName; width: WidthName; mode: PageMode; date: string; lang: Lang }
@@ -325,7 +407,7 @@ export function toPage(md: string, o: PageOptions): { html: string; width: numbe
   const { p } = THEMES[o.theme]
   const isCard = o.mode === 'cards'
   const w = isCard ? { px: CARD.width, font: 17, pad: CARD.padX } : WIDTHS[o.width]
-  const { title, body } = splitTitle(md)
+  const { title, body } = splitTitle(footnotes(md, o.lang))
   const offline = o.mode !== 'html'
   const csp = `default-src 'none'; style-src 'unsafe-inline'; img-src ${offline ? 'data:' : 'https: http: data:'}`
   const hero = title
@@ -342,7 +424,7 @@ export function toPage(md: string, o: PageOptions): { html: string; width: numbe
 <style>${pageCss(p, w.px, w.font, w.pad)}
   .wrap{padding-top:${topPad}px;}
 </style></head>
-<body><div class="wrap">${hero}<div class="content">${mdToHtml(body, { offline, lang: o.lang })}</div>${footer}</div></body></html>`
+<body><div class="wrap">${hero}<div class="content">${mdToHtml(body, { offline, lang: o.lang, lines: o.mode === 'pdf' || o.mode === 'cards' })}</div>${footer}</div></body></html>`
   return { html, width: w.px, bg: p.bg }
 }
 
@@ -361,7 +443,7 @@ const S = {
   table: 'border-collapse:collapse;margin:10px 0;font-size:14px;',
   th: 'border:1px solid #d6d2c8;padding:6px 10px;background:#f3f1ec;font-weight:700;text-align:left;',
   td: 'border:1px solid #d6d2c8;padding:6px 10px;vertical-align:top;',
-  pre: 'margin:10px 0;padding:12px 14px;background:#f5f3ee;border-radius:6px;font-size:13px;line-height:1.6;white-space:pre-wrap;word-break:break-all;',
+  pre: 'margin:10px 0;padding:12px 14px;background:#f5f3ee;border-radius:6px;font-size:13px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;',
   preCode: 'font-family:Menlo,Consolas,monospace;background:none;padding:0;color:#2b2a28;',
   code: 'font-family:Menlo,Consolas,monospace;font-size:0.9em;background:#f3efe9;padding:1px 5px;border-radius:4px;color:#b4532a;',
   hr: 'border:none;border-top:1px solid #ddd;margin:16px 0;',
@@ -388,12 +470,13 @@ function inlineStyles(html: string): string {
   return out
 }
 
-/** 剪贴板用的富文本片段（带内联样式） */
-export function toRichHtml(md: string): string {
-  return `<div style="font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;font-size:15px;color:#222;">${inlineStyles(mdToHtml(md))}</div>`
+/** 剪贴板用的富文本片段（带内联样式）。转 RTF / docx 时系统会去下载图片，所以这里也不放远程图片 */
+export function toRichHtml(md: string, lang: Lang = 'zh'): string {
+  const body = inlineStyles(mdToHtml(footnotes(md, lang), { offline: true, lang }))
+  return `<div style="font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;font-size:15px;color:#222;">${body}</div>`
 }
 
 /** Word 用：同样的内联样式，加上完整文档外壳 */
 export function toWordHtml(md: string, lang: Lang = 'zh'): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(titleOf(md, lang))}</title></head><body>${toRichHtml(md)}</body></html>`
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(titleOf(md, lang))}</title></head><body>${toRichHtml(md, lang)}</body></html>`
 }

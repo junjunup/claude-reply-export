@@ -4,6 +4,11 @@
 
 Adds an "⤓ Export" button under each reply in Claude Code that turns the reply into a format ready to share on other platforms. The button runs locally, never goes through the model, and uses no tokens.
 
+<p>
+  <img src="docs/demo-long.png" alt="Long image (Paper theme)" width="300">
+  <img src="docs/demo-card.png" alt="Page card (Dark theme)" width="300">
+</p>
+
 ## What it exports
 
 | Group | Format | Best for |
@@ -13,14 +18,14 @@ Adds an "⤓ Export" button under each reply in Claude Code that turns the reply
 | | Long image | Paste straight into a chat; also saved as a PNG |
 | | Markdown | The original text |
 | Save as file | Page cards | Xiaohongshu, WeChat Moments: several 3:4 cards with page numbers |
-| | PDF | A4 pages that never split a line of text in half; the file is also put on the clipboard |
+| | PDF | A4 pages with page numbers and clickable links; long code blocks break between lines; the file is also put on the clipboard |
 | | Word | .docx; the file is also put on the clipboard |
 | | HTML | A standalone web page |
 
 - Three themes (warm paper, clean white, dark), two widths (phone, desktop), and an English or Chinese interface; your choices are remembered.
 - A reply that starts with a heading gets a title card; code blocks are syntax-highlighted; spaces are added between Chinese and Latin text.
 - "Whole reply" joins the body text that tool calls split apart and skips the progress updates sent in between.
-- **Privacy check before export**: when it finds local file paths, email addresses, phone numbers, or likely API keys, it asks whether to mask them before exporting.
+- **Privacy check before export**: when it finds local file paths, email addresses, phone numbers, IP addresses, or likely secrets (API keys, tokens, private keys, passwords in URLs), it asks whether to mask them before exporting.
 
 Files are saved to `~/Downloads/Claude Exports/` (or `~/Downloads/Claude导出/` when the interface is in Chinese).
 
@@ -60,6 +65,17 @@ The language setting covers button labels, notifications, the export folder name
 - Exporting replaces what's currently on your clipboard.
 - Thinking is never exported, only the reply text.
 - Markdown parsing uses [marked](https://github.com/markedjs/marked) (MIT license, see `hooks/vendor/marked.LICENSE.md`).
+
+## Development
+
+```bash
+claude plugin test            # unit and UI tests
+claude plugin validate .      # check the plugin structure
+node scripts/native-test.ts   # build the native helper and really render a long image, cards and a PDF (leaves the clipboard alone)
+node scripts/demo.ts          # regenerate the images in this README
+```
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## License
 
