@@ -449,17 +449,13 @@ export const register: Register = on => {
       )
     }
 
-    // 最新一条回复常驻显示；更早的回复平时隐藏，鼠标悬停时浮出（操作进行中则保持显示）
-    const alwaysShow = isLatest || menuState !== '' || working !== '' || waiting !== ''
-    const scope = `rx-${id.slice(-48)}`
+    // 每条回复（包括历史回复）的最后一段下面都常驻显示导出按钮。
+    // 之前更早的回复只在鼠标悬停时浮出，但桌面 app 不一定支持悬停显示，历史回复就看不到按钮。
+    void isLatest
     return (
-      <Box flexDirection="column" hover={{ scope }}>
+      <Box flexDirection="column">
         {original}
-        {alwaysShow ? (
-          <Box marginTop={1}>{row}</Box>
-        ) : (
-          <Box marginTop={1} display="none" hover={{ scope, display: 'flex' }}>{row}</Box>
-        )}
+        <Box marginTop={1}>{row}</Box>
       </Box>
     )
   })

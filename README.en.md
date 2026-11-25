@@ -63,7 +63,7 @@ Long images and cards come in three themes, switched under Style in the menu:
 ## Details
 
 - **It exports the whole reply.** When a reply is split up by tool calls, the plugin joins the parts back together and skips progress notes like "Let me look at the code first." Thinking is never exported.
-- **Where the button is:** always shown on the latest reply; on earlier replies, it appears when you hover. It doesn't show while a reply is still being written.
+- **Where the button is:** shown under the last part of every reply, earlier replies included. It doesn't show while a reply is still being written.
 - **Title card:** a reply that opens with a heading gets a title card with the date in long images and cards.
 - **Formatting:** code blocks are syntax-highlighted; in mixed Chinese and English text a space is added between the two (never inside code or URLs); footnotes become superscript numbers with the notes at the end.
 - **Very tall images:** if a long image is taller than about 12,000 pixels, you get a hint to use Page cards instead, since chat apps compress very tall images.
@@ -108,7 +108,7 @@ The first time you export rich text, a long image, cards, a PDF, or Word, the pl
 <summary><b>I don't see the Export button.</b></summary>
 
 1. Restart Claude Code after installing.
-2. The button doesn't show while a reply is still being written. On earlier replies, hover to reveal it.
+2. The button doesn't show while a reply is still being written; it appears once the turn ends.
 3. Run `claude plugin list` and check that `reply-export` is enabled.
 </details>
 
